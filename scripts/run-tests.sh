@@ -9,22 +9,20 @@ cleanup() {
 }
 trap cleanup EXIT
 
-export API_IMAGE="${API_IMAGE:-vigilant}"
+echo "=== Building and starting services ==="
+docker compose up --build -d
 
-echo "=== Starting services ==="
-docker compose up --wait --build 2>&1
-
-echo "=== Waiting for ready ==="
+echo "=== Waiting for API readiness ==="
 for attempt in $(seq 1 30); do
     if curl -sf http://localhost:9999/ready > /dev/null 2>&1; then
-        echo "API ready"
+        echo "API ready on port 9999"
         break
     fi
     echo "  attempt $attempt/30..."
     sleep 2
 done
 
-echo "=== Running smoke test (k6) ==="
+echo "=== Running smoke test ==="
 if command -v k6 &> /dev/null; then
     k6 run .references/rinha-de-backend-2026-main/test/smoke.js
 else

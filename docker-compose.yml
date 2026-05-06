@@ -15,7 +15,8 @@ services:
           memory: "30M"
 
   api1: &api
-    image: ${API_IMAGE:?set API_IMAGE or run docker compose build}
+    image: ${API_IMAGE:-vigilant:latest}
+    build: .
     environment:
       INDEX_PATH: /data/index.bin
       MCC_RISK_PATH: /data/mcc_risk.json
