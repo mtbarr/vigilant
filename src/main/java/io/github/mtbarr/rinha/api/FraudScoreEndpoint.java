@@ -23,20 +23,19 @@ public class FraudScoreEndpoint {
 
     @POST
     @Consumes(MediaType.APPLICATION_JSON)
-    @Produces(MediaType.APPLICATION_JSON)
-    public byte[] computeFraudScore(final byte[] requestBody) {
+    @Produces(MediaType.TEXT_PLAIN)
+    public String computeFraudScore(final byte[] requestBody) {
         if (!vectorIndex.isReady()) {
-            return "{\"approved\":true,\"fraud_score\":0.0}".getBytes(StandardCharsets.UTF_8);
+            return "{\"approved\":true,\"fraud_score\":0.0}";
         }
         try {
             final float[] featureVector = fraudRequestParser.extractVector(requestBody);
             final int fraudVotes = vectorIndex.search(featureVector);
             final double fraudScore = fraudVotes * 0.2;
             final boolean isApproved = fraudVotes < 3;
-            final String responseJson = "{\"approved\":" + isApproved + ",\"fraud_score\":" + fraudScore + "}";
-            return responseJson.getBytes(StandardCharsets.UTF_8);
+            return "{\"approved\":" + isApproved + ",\"fraud_score\":" + fraudScore + "}";
         } catch (final Exception unexpectedError) {
-            return "{\"approved\":true,\"fraud_score\":0.0}".getBytes(StandardCharsets.UTF_8);
+            return "{\"approved\":true,\"fraud_score\":0.0}";
         }
     }
 }
