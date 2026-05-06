@@ -78,7 +78,7 @@ public class InvertedFileIndex {
         throw new IOException("Expected " + DIMENSIONS + " dimensions, got " + dimensions);
       }
 
-      buffer.getInt(); // stride
+      buffer.getInt(); 
       final float scale = buffer.getFloat();
       if (Math.abs(scale - QUANTIZATION_SCALE) > 0.1f) {
         throw new IOException("Expected scale " + QUANTIZATION_SCALE + ", got " + scale);

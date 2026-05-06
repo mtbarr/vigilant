@@ -35,7 +35,7 @@ public class FraudRequestParser {
   public float[] extractVector(final byte[] requestBody) {
     final ByteCursor cursor = new ByteCursor(requestBody);
 
-    cursor.skipFieldValue();                                       // "id"
+    cursor.skipFieldValue();
 
     cursor.skipToField(FIELD_AMOUNT);
     final float transactionAmount = cursor.parseFloat();
@@ -171,9 +171,6 @@ public class FraudRequestParser {
     return featureVector;
   }
 
-  // -------------------------------------------------------------------------
-  // Merchant list matching
-  // -------------------------------------------------------------------------
 
   private static boolean isMerchantInList(final byte[] source,
                                           final int rangeStart, final int rangeEnd,
@@ -233,14 +230,10 @@ public class FraudRequestParser {
       case 7995 -> 0.85f;
       case 4511 -> 0.35f;
       case 5311 -> 0.25f;
-      case 5999 -> 0.50f;
       default -> 0.50f;
     };
   }
 
-  // -------------------------------------------------------------------------
-  // Date/time arithmetic (no java.time allocation)
-  // -------------------------------------------------------------------------
 
   static float dayOfWeek(final int year, final int month, final int day) {
     final int yearOffset = month < 3 ? year - 1 : year;
@@ -275,9 +268,6 @@ public class FraudRequestParser {
     return (long) era * 146097 + dayOfEra - 719468;
   }
 
-  // -------------------------------------------------------------------------
-  // Byte-level cursor over JSON body
-  // -------------------------------------------------------------------------
 
   private static final class ByteCursor {
     private static final byte QUOTE = '"';
@@ -324,7 +314,6 @@ public class FraudRequestParser {
       }
     }
 
-    // --- Field navigation ---
 
     void skipToField(final byte[] fieldName) {
       while (offset < source.length) {
@@ -396,7 +385,6 @@ public class FraudRequestParser {
       }
     }
 
-    // --- Value parsing ---
 
     int parseInt() {
       skipWhitespace();
@@ -482,7 +470,6 @@ public class FraudRequestParser {
       return readDigits(2);
     }
 
-    // --- Low-level helpers ---
 
     private boolean startsWith(final int start, final byte[] pattern) {
       if (start + pattern.length > source.length) {

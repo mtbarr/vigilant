@@ -9,7 +9,6 @@ COPY build.gradle.kts settings.gradle.kts gradle.properties ./
 RUN ./gradlew :compileJava --no-daemon || true
 
 COPY src ./src
-
 RUN ./gradlew :compileJava --no-daemon
 
 RUN mkdir -p /data && java \
@@ -29,15 +28,15 @@ RUN ./gradlew quarkusBuild \
     -Dquarkus.native.additional-build-args="-J--add-modules=jdk.incubator.vector,-march=haswell" \
     --no-daemon
 
-# Stage 3: Runtime minimo (so o binario nativo)
-FROM quay.io/quarkus/quarkus-micro-image:2.0
+# Stage 3: Runtime com Debian 12 (GLIBC 2.36, suporta o binario nativo)
+FROM gcr.io/distroless/base-debian12
 WORKDIR /app
 
 COPY --from=native-builder /build/build/*-runner /app/application
 COPY --from=index-builder /data/index.bin /app/data/index.bin
 COPY src/main/resources/mcc_risk.json /app/data/mcc_risk.json
 
-RUN chmod +x /app/application
+COPY --from=native-builder /usr/lib64/libz.so.1 /lib/x86_64-linux-gnu/libz.so.1
 
 EXPOSE 8080
 
