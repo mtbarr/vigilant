@@ -25,7 +25,7 @@ COPY . .
 RUN chmod +x gradlew
 RUN ./gradlew quarkusBuild \
     -Dquarkus.package.type=native \
-    -Dquarkus.native.additional-build-args="-J--add-modules=jdk.incubator.vector,-march=haswell" \
+    -Dquarkus.native.additional-build-args="-J--add-modules=jdk.incubator.vector,-H:+VectorAPISupport,-march=haswell" \
     --no-daemon
 
 # Stage 3: Runtime com Debian 12 (GLIBC 2.36, suporta o binario nativo)
