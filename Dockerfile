@@ -24,8 +24,8 @@ FROM ghcr.io/graalvm/graalvm-community:25 AS native-builder
 WORKDIR /build
 COPY . .
 RUN chmod +x gradlew
-RUN ./gradlew build \
-    -Dquarkus.native.enabled=true \
+RUN ./gradlew quarkusBuild \
+    -Dquarkus.package.type=native \
     -Dquarkus.native.additional-build-args="-J--add-modules=jdk.incubator.vector,-march=haswell" \
     --no-daemon
 
