@@ -2,21 +2,20 @@ package io.github.mtbarr.rinha.index;
 
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
+import jdk.incubator.vector.IntVector;
+import jdk.incubator.vector.ShortVector;
+import jdk.incubator.vector.VectorOperators;
+import jdk.incubator.vector.VectorSpecies;
 import java.io.File;
 import java.io.IOException;
 import java.io.RandomAccessFile;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.channels.FileChannel;
-import jdk.incubator.vector.IntVector;
-import jdk.incubator.vector.ShortVector;
-import jdk.incubator.vector.VectorOperators;
-import jdk.incubator.vector.VectorSpecies;
 
 @ApplicationScoped
 public class InvertedFileIndex {
 
-  public static final int CLUSTER_COUNT = 256;
   public static final int DIMENSIONS = 14;
   public static final int K_NEIGHBORS = 5;
   public static final float QUANTIZATION_SCALE = 10_000f;
@@ -27,6 +26,7 @@ public class InvertedFileIndex {
   private static final VectorSpecies<Short> SHORT_SPECIES = ShortVector.SPECIES_PREFERRED;
   private static final int VECTOR_LANE_COUNT = SHORT_SPECIES.length();
 
+  private int clusterCount;
   private short[][] quantizedCentroids;
   private short[][] bboxMinimum;
   private short[][] bboxMaximum;
@@ -56,7 +56,7 @@ public class InvertedFileIndex {
   private void loadIndex(final String indexPath) throws IOException {
     final File indexFile = new File(indexPath);
     try (final RandomAccessFile file = new RandomAccessFile(indexFile, "r");
-      final FileChannel channel = file.getChannel()) {
+         final FileChannel channel = file.getChannel()) {
 
       final ByteBuffer buffer = channel.map(
         FileChannel.MapMode.READ_ONLY, 0, indexFile.length());
@@ -68,45 +68,42 @@ public class InvertedFileIndex {
       }
 
       final int vectorCount = buffer.getInt();
-      final int clusterCount = buffer.getInt();
-      if (clusterCount != CLUSTER_COUNT) {
-        throw new IOException("Expected " + CLUSTER_COUNT + " clusters, got " + clusterCount);
-      }
+      clusterCount = buffer.getInt();
 
       final int dimensions = buffer.getInt();
       if (dimensions != DIMENSIONS) {
         throw new IOException("Expected " + DIMENSIONS + " dimensions, got " + dimensions);
       }
 
-      buffer.getInt(); 
+      buffer.getInt();
       final float scale = buffer.getFloat();
       if (Math.abs(scale - QUANTIZATION_SCALE) > 0.1f) {
         throw new IOException("Expected scale " + QUANTIZATION_SCALE + ", got " + scale);
       }
 
-      final float[][] rawCentroids = new float[CLUSTER_COUNT][DIMENSIONS];
-      for (int clusterIndex = 0; clusterIndex < CLUSTER_COUNT; clusterIndex++) {
+      final float[][] rawCentroids = new float[clusterCount][DIMENSIONS];
+      for (int clusterIndex = 0; clusterIndex < clusterCount; clusterIndex++) {
         for (int dimension = 0; dimension < DIMENSIONS; dimension++) {
           rawCentroids[clusterIndex][dimension] = buffer.getFloat();
         }
       }
 
-      bboxMinimum = new short[CLUSTER_COUNT][DIMENSIONS];
-      bboxMaximum = new short[CLUSTER_COUNT][DIMENSIONS];
-      for (int clusterIndex = 0; clusterIndex < CLUSTER_COUNT; clusterIndex++) {
+      bboxMinimum = new short[clusterCount][DIMENSIONS];
+      bboxMaximum = new short[clusterCount][DIMENSIONS];
+      for (int clusterIndex = 0; clusterIndex < clusterCount; clusterIndex++) {
         for (int dimension = 0; dimension < DIMENSIONS; dimension++) {
           bboxMinimum[clusterIndex][dimension] = buffer.getShort();
           bboxMaximum[clusterIndex][dimension] = buffer.getShort();
         }
       }
 
-      final int[] clusterOffsets = new int[CLUSTER_COUNT + 1];
-      for (int index = 0; index <= CLUSTER_COUNT; index++) {
+      final int[] clusterOffsets = new int[clusterCount + 1];
+      for (int index = 0; index <= clusterCount; index++) {
         clusterOffsets[index] = buffer.getInt();
       }
-      clusterStartOffset = new int[CLUSTER_COUNT];
-      clusterEndOffset = new int[CLUSTER_COUNT];
-      for (int clusterIndex = 0; clusterIndex < CLUSTER_COUNT; clusterIndex++) {
+      clusterStartOffset = new int[clusterCount];
+      clusterEndOffset = new int[clusterCount];
+      for (int clusterIndex = 0; clusterIndex < clusterCount; clusterIndex++) {
         clusterStartOffset[clusterIndex] = clusterOffsets[clusterIndex];
         clusterEndOffset[clusterIndex] = clusterOffsets[clusterIndex + 1];
       }
@@ -134,8 +131,8 @@ public class InvertedFileIndex {
         vectorOriginalIds[position] = buffer.getInt();
       }
 
-      quantizedCentroids = new short[CLUSTER_COUNT][DIMENSIONS];
-      for (int clusterIndex = 0; clusterIndex < CLUSTER_COUNT; clusterIndex++) {
+      quantizedCentroids = new short[clusterCount][DIMENSIONS];
+      for (int clusterIndex = 0; clusterIndex < clusterCount; clusterIndex++) {
         for (int dimension = 0; dimension < DIMENSIONS; dimension++) {
           quantizedCentroids[clusterIndex][dimension] = quantize(rawCentroids[clusterIndex][dimension]);
         }
@@ -144,20 +141,21 @@ public class InvertedFileIndex {
   }
 
   public int search(final float[] queryVectorFloat) {
+    final int k = clusterCount;
     final short[] queryQuantized = new short[DIMENSIONS];
     for (int dimension = 0; dimension < DIMENSIONS; dimension++) {
       queryQuantized[dimension] = quantize(queryVectorFloat[dimension]);
     }
 
-    final long[] centroidDistances = new long[CLUSTER_COUNT];
-    for (int clusterIndex = 0; clusterIndex < CLUSTER_COUNT; clusterIndex++) {
+    final long[] centroidDistances = new long[k];
+    for (int clusterIndex = 0; clusterIndex < k; clusterIndex++) {
       centroidDistances[clusterIndex] = vectorSquaredDistance(
         queryQuantized, quantizedCentroids[clusterIndex]);
     }
 
     final int[] fastProbes = selectClosestCentroids(centroidDistances, FAST_PROBE_COUNT);
     final NearestNeighborsBuffer nearestNeighbors = new NearestNeighborsBuffer();
-    final boolean[] visitedClusters = new boolean[CLUSTER_COUNT];
+    final boolean[] visitedClusters = new boolean[k];
 
     for (final int clusterIndex : fastProbes) {
       visitedClusters[clusterIndex] = true;
@@ -176,7 +174,7 @@ public class InvertedFileIndex {
       }
     }
 
-    for (int clusterIndex = 0; clusterIndex < CLUSTER_COUNT; clusterIndex++) {
+    for (int clusterIndex = 0; clusterIndex < k; clusterIndex++) {
       if (visitedClusters[clusterIndex]) {
         continue;
       }
@@ -256,9 +254,10 @@ public class InvertedFileIndex {
   }
 
   private int[] selectClosestCentroids(final long[] distances, final int count) {
+    final int k = clusterCount;
     if (count == 1) {
       int bestIndex = 0;
-      for (int position = 1; position < CLUSTER_COUNT; position++) {
+      for (int position = 1; position < k; position++) {
         if (distances[position] < distances[bestIndex]) {
           bestIndex = position;
         }
@@ -267,11 +266,11 @@ public class InvertedFileIndex {
     }
 
     final int[] selectedIndices = new int[count];
-    final boolean[] isUsed = new boolean[CLUSTER_COUNT];
+    final boolean[] isUsed = new boolean[k];
 
     for (int selectionRound = 0; selectionRound < count; selectionRound++) {
       int bestIndex = -1;
-      for (int position = 0; position < CLUSTER_COUNT; position++) {
+      for (int position = 0; position < k; position++) {
         if (isUsed[position]) {
           continue;
         }

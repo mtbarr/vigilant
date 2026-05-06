@@ -24,7 +24,10 @@ public final class OfflineIndexBuilder {
   private record ParseResult(float[][] vectors, byte[] labels) {}
 
 
-  private static final int CLUSTER_COUNT = 1024;
+  private static final int CLUSTER_COUNT = Integer.parseInt(
+      System.getenv().getOrDefault("IVF_CLUSTER_COUNT", "1024")
+  );
+
   private static final int DIMENSIONS = 14;
   private static final int TRAINING_SAMPLE_SIZE = 131_072;
   private static final int KMEANS_ITERATIONS = 10;
@@ -39,6 +42,7 @@ public final class OfflineIndexBuilder {
     if (arguments.length < 2) {
       System.err.println("Usage: OfflineIndexBuilder <references.json.gz> <output.index.bin>");
       System.exit(1);
+      return;
     }
 
     final String inputPath = arguments[0];
