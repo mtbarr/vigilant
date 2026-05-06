@@ -12,7 +12,7 @@ COPY src ./src
 
 RUN ./gradlew :compileJava --no-daemon
 
-RUN java \
+RUN mkdir -p /data && java \
     -Xmx4g \
     -cp "$(./gradlew -q :printClasspath --no-daemon):build/classes/java/main" \
     io.github.mtbarr.rinha.index.OfflineIndexBuilder \
