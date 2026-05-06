@@ -8,6 +8,9 @@ COPY build.gradle.kts settings.gradle.kts gradle.properties ./
 RUN ./gradlew :compileJava --no-daemon || true
 
 COPY src ./src
+
+# dados da rinha (references.json.gz, mcc_risk.json)
+# se nao existirem, o build falha aqui com mensagem clara
 COPY data /data
 
 RUN ./gradlew :compileJava --no-daemon
@@ -35,8 +38,8 @@ FROM quay.io/quarkus/quarkus-micro-image:2.0
 WORKDIR /app
 
 COPY --from=native-builder /build/build/*-runner /app/application
-COPY --from=index-builder /data/index.bin /app/data/index.bin
-COPY data/mcc_risk.json /app/data/
+COPY --from=index-builder /data/index.bin /app/data/
+COPY --from=index-builder /data/mcc_risk.json /app/data/
 
 RUN chmod +x /app/application
 
