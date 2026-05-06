@@ -5,6 +5,7 @@ services:
       - 9999:9999
     volumes:
       - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+      - ./nsswitch.conf:/etc/nsswitch.conf:ro
     depends_on:
       - api1
       - api2
