@@ -18,10 +18,8 @@ services:
     image: ${API_IMAGE:-vigilant:latest}
     build: .
     environment:
-      INDEX_PATH: /data/index.bin
-      MCC_RISK_PATH: /data/mcc_risk.json
-    volumes:
-      - ./data:/data:ro
+      INDEX_PATH: /app/data/index.bin
+      MCC_RISK_PATH: /app/data/mcc_risk.json
     deploy:
       resources:
         limits:
