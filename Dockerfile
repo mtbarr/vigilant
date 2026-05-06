@@ -3,6 +3,7 @@ FROM eclipse-temurin:25-jdk AS index-builder
 WORKDIR /build
 
 COPY gradlew gradlew.bat ./
+RUN chmod +x gradlew
 COPY gradle ./gradle
 COPY build.gradle.kts settings.gradle.kts gradle.properties ./
 RUN ./gradlew :compileJava --no-daemon || true
@@ -22,6 +23,7 @@ RUN java \
 FROM ghcr.io/graalvm/graalvm-community:25 AS native-builder
 WORKDIR /build
 COPY . .
+RUN chmod +x gradlew
 RUN ./gradlew build \
     -Dquarkus.native.enabled=true \
     -Dquarkus.native.additional-build-args="-J--add-modules=jdk.incubator.vector,-march=haswell" \
