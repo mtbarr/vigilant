@@ -4,7 +4,6 @@ import io.github.mtbarr.rinha.index.InvertedFileIndex;
 import io.github.mtbarr.rinha.service.FraudRequestParser;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.POST;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.Produces;
@@ -15,8 +14,7 @@ import java.nio.charset.StandardCharsets;
 @ApplicationScoped
 public class FraudScoreEndpoint {
 
-  private static final byte[] EMPTY_RESPONSE = "{\"approved\":true,\"fraud_score\":0.0}"
-    .getBytes(StandardCharsets.UTF_8);
+  private static final String EMPTY_RESPONSE = "{\"approved\":true,\"fraud_score\":0.0}";
 
   @Inject
   InvertedFileIndex vectorIndex;
@@ -25,18 +23,18 @@ public class FraudScoreEndpoint {
   FraudRequestParser fraudRequestParser;
 
   @POST
-  @Consumes(MediaType.APPLICATION_JSON)
-  @Produces(MediaType.APPLICATION_OCTET_STREAM)
-  public byte[] computeFraudScore(final byte[] requestBody) {
+  @Produces(MediaType.TEXT_PLAIN)
+  public String computeFraudScore(final String requestBody) {
     if (!vectorIndex.isReady()) {
       return EMPTY_RESPONSE;
     }
     try {
-      final float[] featureVector = fraudRequestParser.extractVector(requestBody);
+      final byte[] rawBytes = requestBody.getBytes(StandardCharsets.UTF_8);
+      final float[] featureVector = fraudRequestParser.extractVector(rawBytes);
       final int fraudVotes = vectorIndex.search(featureVector);
       final double fraudScore = fraudVotes * 0.2;
       final boolean isApproved = fraudVotes < 3;
-      return ("{\"approved\":" + isApproved + ",\"fraud_score\":" + fraudScore + "}").getBytes(StandardCharsets.UTF_8);
+      return "{\"approved\":" + isApproved + ",\"fraud_score\":" + fraudScore + "}";
     } catch (final Exception unexpectedError) {
       return EMPTY_RESPONSE;
     }
