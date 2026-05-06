@@ -21,7 +21,8 @@ import java.util.zip.GZIPInputStream;
 
 public final class OfflineIndexBuilder {
 
-  private record ParseResult(float[][] vectors, byte[] labels) {}
+  private record ParseResult(float[][] vectors, byte[] labels) {
+  }
 
 
   private static final int CLUSTER_COUNT = Integer.parseInt(
