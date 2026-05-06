@@ -19,7 +19,8 @@ services:
     image: ${API_IMAGE:-vigilant:latest}
     build: .
     environment:
-      SOCK_PATH: /sockets/api1.sock
+      QUARKUS_HTTP_DOMAIN_SOCKET: /sockets/api1.sock
+      QUARKUS_HTTP_DOMAIN_SOCKET_ENABLED: "true"
       INDEX_PATH: /app/data/index.bin
       MCC_RISK_PATH: /app/data/mcc_risk.json
     volumes:
@@ -33,7 +34,8 @@ services:
   api2:
     <<: *api
     environment:
-      SOCK_PATH: /sockets/api2.sock
+      QUARKUS_HTTP_DOMAIN_SOCKET: /sockets/api2.sock
+      QUARKUS_HTTP_DOMAIN_SOCKET_ENABLED: "true"
       INDEX_PATH: /app/data/index.bin
       MCC_RISK_PATH: /app/data/mcc_risk.json
 
