@@ -12,7 +12,7 @@ services:
       resources:
         limits:
           cpus: "0.10"
-          memory: "30M"
+          memory: "50M"
 
   api1: &api
     image: ${API_IMAGE:-vigilant:latest}
