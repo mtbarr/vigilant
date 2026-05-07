@@ -5,9 +5,10 @@ import jakarta.enterprise.context.ApplicationScoped;
 import java.io.File;
 import java.io.IOException;
 import java.io.RandomAccessFile;
-import java.nio.ByteOrder;
-import java.nio.MappedByteBuffer;
-import java.nio.channels.FileChannel;
+import java.lang.foreign.Arena;
+import java.lang.foreign.MemorySegment;
+import java.lang.foreign.ValueLayout;
+import java.nio.channels.FileChannel.MapMode;
 import java.util.Arrays;
 
 @ApplicationScoped
@@ -23,15 +24,12 @@ public class InvertedFileIndex {
   private static final long HEADER_SIZE = 56L;
   private static final long CLUSTER_TABLE_ENTRY_SIZE = 8L;
 
-  private MappedByteBuffer entireFileBuffer;
+  private MemorySegment indexSegment;
   private float[] ivfCentroidsFlat;
-  private float[] sq8MinValues;
-  private float[] sq8MaxValues;
-  private float[] sq8DimensionRanges;
-  private float[] sq8InverseLevels;
+  private float[] sq8ScaledMinValues;
+  private float[] sq8InverseStep;
   private byte[] reorderedFraudLabels;
   private long vectorsSectionOffset;
-  private long labelsSectionOffset;
   private long clusterTableOffset;
   private volatile boolean isIndexReady = false;
 
@@ -70,59 +68,100 @@ public class InvertedFileIndex {
   private void loadIndexFromFile(final String filePath) throws IOException {
     final File indexFile = new File(filePath);
     try (final var randomAccessFile = new RandomAccessFile(indexFile, "r");
-         final var fileChannel = randomAccessFile.getChannel()) {
-      entireFileBuffer = fileChannel.map(
-        FileChannel.MapMode.READ_ONLY,
+      final var fileChannel = randomAccessFile.getChannel()) {
+      indexSegment = fileChannel.map(
+        MapMode.READ_ONLY,
         0,
-        indexFile.length()
+        indexFile.length(),
+        Arena.global()
       );
 
-      entireFileBuffer.order(ByteOrder.LITTLE_ENDIAN);
-
-      final int magicNumber = entireFileBuffer.getInt(0);
+      final int magicNumber = indexSegment.getAtIndex(
+        ValueLayout.JAVA_INT,
+        0
+      );
       if (magicNumber != 0x52494E44) {
         throw new IOException("Bad magic: " + Integer.toHexString(magicNumber));
       }
-      final int versionNumber = entireFileBuffer.getInt(4);
+      final int versionNumber = indexSegment.getAtIndex(
+        ValueLayout.JAVA_INT,
+        4
+      );
       if (versionNumber != 1) {
         throw new IOException("Bad version: " + versionNumber);
       }
-      final int storedClusters = entireFileBuffer.getInt(8);
+      final int storedClusters = indexSegment.getAtIndex(
+        ValueLayout.JAVA_INT,
+        8
+      );
       if (storedClusters != NUM_CLUSTERS) {
         throw new IOException(
           "Expected K=" + NUM_CLUSTERS + " got " + storedClusters
         );
       }
-      final int totalVectorCount = entireFileBuffer.getInt(12);
-      final long centroidsSectionOffset = entireFileBuffer.getLong(16);
-      final long quantizationParamsOffset = entireFileBuffer.getLong(24);
-      clusterTableOffset = entireFileBuffer.getLong(32);
-      vectorsSectionOffset = entireFileBuffer.getLong(40);
-      labelsSectionOffset = entireFileBuffer.getLong(48);
+      final int totalVectorCount = indexSegment.getAtIndex(
+        ValueLayout.JAVA_INT,
+        12
+      );
+      final long centroidsSectionOffset = indexSegment.getAtIndex(
+        ValueLayout.JAVA_LONG,
+        16
+      );
+      final long quantizationParamsOffset = indexSegment.getAtIndex(
+        ValueLayout.JAVA_LONG,
+        24
+      );
+      clusterTableOffset = indexSegment.getAtIndex(
+        ValueLayout.JAVA_LONG,
+        32
+      );
+      vectorsSectionOffset = indexSegment.getAtIndex(
+        ValueLayout.JAVA_LONG,
+        40
+      );
+      final long labelsSectionOffset = indexSegment.getAtIndex(
+        ValueLayout.JAVA_LONG,
+        48
+      );
 
       ivfCentroidsFlat = new float[NUM_CLUSTERS * NUM_DIMENSIONS];
-      final int centroidsStart = (int) centroidsSectionOffset;
+      final MemorySegment centroidsSegment = indexSegment.asSlice(
+        centroidsSectionOffset,
+        (long) NUM_CLUSTERS * NUM_DIMENSIONS * 4L
+      );
+      centroidsSegment.asByteBuffer().order(java.nio.ByteOrder.LITTLE_ENDIAN);
       for (int i = 0; i < NUM_CLUSTERS * NUM_DIMENSIONS; i++) {
-        ivfCentroidsFlat[i] = entireFileBuffer.getFloat(centroidsStart + i * 4);
+        ivfCentroidsFlat[i] = centroidsSegment.getAtIndex(
+          ValueLayout.JAVA_FLOAT,
+          (long) i * 4L
+        );
       }
 
-      sq8MinValues = new float[NUM_DIMENSIONS];
-      sq8MaxValues = new float[NUM_DIMENSIONS];
-      sq8DimensionRanges = new float[NUM_DIMENSIONS];
-      sq8InverseLevels = new float[NUM_DIMENSIONS];
-      final int paramsStart = (int) quantizationParamsOffset;
+      sq8ScaledMinValues = new float[NUM_DIMENSIONS];
+      sq8InverseStep = new float[NUM_DIMENSIONS];
+      final MemorySegment paramsSegment = indexSegment.asSlice(
+        quantizationParamsOffset,
+        (long) NUM_DIMENSIONS * 2L * 4L
+      );
       for (int d = 0; d < NUM_DIMENSIONS; d++) {
-        sq8MinValues[d] = entireFileBuffer.getFloat(paramsStart + (d * 2) * 4);
-        sq8MaxValues[d] = entireFileBuffer.getFloat(paramsStart + (d * 2 + 1) * 4);
-        sq8DimensionRanges[d] = sq8MaxValues[d] - sq8MinValues[d];
-        sq8InverseLevels[d] = sq8DimensionRanges[d] / (SQ8_LEVELS - 1);
+        final float minValue = paramsSegment.getAtIndex(
+          ValueLayout.JAVA_FLOAT,
+          (long) (d * 2) * 4L
+        );
+        final float maxValue = paramsSegment.getAtIndex(
+          ValueLayout.JAVA_FLOAT,
+          (long) (d * 2 + 1) * 4L
+        );
+        sq8ScaledMinValues[d] = minValue;
+        sq8InverseStep[d] = (maxValue - minValue) / (SQ8_LEVELS - 1);
       }
 
       reorderedFraudLabels = new byte[totalVectorCount];
-      final int labelsStart = (int) labelsSectionOffset;
-      for (int i = 0; i < totalVectorCount; i++) {
-        reorderedFraudLabels[i] = entireFileBuffer.get(labelsStart + i);
-      }
+      final MemorySegment labelsSegment = indexSegment.asSlice(
+        labelsSectionOffset,
+        totalVectorCount
+      );
+      labelsSegment.asByteBuffer().get(reorderedFraudLabels);
     }
   }
 
@@ -145,7 +184,7 @@ public class InvertedFileIndex {
   ) {
     final float[] scaledQuery = scaledQueryBuffer.get();
     for (int d = 0; d < NUM_DIMENSIONS; d++) {
-      scaledQuery[d] = (queryVector[d] - sq8MinValues[d]) / sq8InverseLevels[d];
+      scaledQuery[d] = (queryVector[d] - sq8ScaledMinValues[d]) / sq8InverseStep[d];
     }
 
     final float[] centroidDistances = centroidDistanceBuffer.get();
@@ -169,19 +208,29 @@ public class InvertedFileIndex {
 
     for (int probeIndex = 0; probeIndex < NUM_PROBE_CLUSTERS; probeIndex++) {
       final int clusterIndex = centroidOrder[probeIndex];
-      final int clusterBase = entireFileBuffer.getInt(
-        (int) (clusterTableOffset + (long) clusterIndex * CLUSTER_TABLE_ENTRY_SIZE)
+      final long tableEntryOffset = clusterTableOffset
+                                    + (long) clusterIndex * CLUSTER_TABLE_ENTRY_SIZE;
+      final int clusterBase = indexSegment.getAtIndex(
+        ValueLayout.JAVA_INT,
+        tableEntryOffset
       );
-      final int clusterSize = entireFileBuffer.getInt(
-        (int) (clusterTableOffset + (long) clusterIndex * CLUSTER_TABLE_ENTRY_SIZE + 4L)
+
+      final int clusterSize = indexSegment.getAtIndex(
+        ValueLayout.JAVA_INT,
+        tableEntryOffset + 4L
       );
-      final int clusterVectorStart = (int) (vectorsSectionOffset
-                                      + (long) clusterBase * NUM_DIMENSIONS);
+
+      final long clusterVectorStart = vectorsSectionOffset
+                                      + (long) clusterBase * NUM_DIMENSIONS;
+      final MemorySegment clusterSegment = indexSegment.asSlice(
+        clusterVectorStart,
+        (long) clusterSize * NUM_DIMENSIONS
+      );
 
       for (int vectorIndex = 0; vectorIndex < clusterSize; vectorIndex++) {
-        final int vectorOffset = clusterVectorStart + vectorIndex * NUM_DIMENSIONS;
+        final long vectorOffset = (long) vectorIndex * NUM_DIMENSIONS;
         final int globalIndex = clusterBase + vectorIndex;
-        final float approxDistance = computeSq8Distance(scaledQuery, vectorOffset);
+        final float approxDistance = computeSq8Distance(scaledQuery, clusterSegment, vectorOffset);
         if (approxDistance < candidateDists[NUM_CANDIDATES - 1]) {
           insertIntoSortedArray(
             candidateIds,
@@ -221,11 +270,15 @@ public class InvertedFileIndex {
 
   private float computeSq8Distance(
     final float[] scaledQuery,
-    final int vectorOffset
+    final MemorySegment clusterSegment,
+    final long vectorOffset
   ) {
     float sum = 0;
     for (int d = 0; d < NUM_DIMENSIONS; d++) {
-      final float diff = scaledQuery[d] - (entireFileBuffer.get(vectorOffset + d) & 0xFF);
+      final float diff = scaledQuery[d] - (clusterSegment.getAtIndex(
+        ValueLayout.JAVA_BYTE,
+        vectorOffset + d
+      ) & 0xFF);
       sum += diff * diff;
     }
     return sum;
