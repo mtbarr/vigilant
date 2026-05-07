@@ -22,10 +22,10 @@ public final class OfflineIndexBuilder {
   private static final int PQ_M = 7;
   private static final int PQ_SUB_D = 2;
   private static final int PQ_CODEBOOK_SIZE = 256;
-  private static final int TRAINING_SAMPLE_SIZE = 50_000;
-  private static final int IVF_MAX_ITERATIONS = 25;
+  private static final int TRAINING_SAMPLE_SIZE = Integer.MAX_VALUE;
+  private static final int IVF_MAX_ITERATIONS = 20;
   private static final int PQ_MAX_ITERATIONS = 20;
-  private static final long RANDOM_SEED = 0xdeadbeefcafebabeL;
+  private static final long RANDOM_SEED = 42L;
 
   private OfflineIndexBuilder() {
   }
