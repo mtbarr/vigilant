@@ -16,13 +16,13 @@ public final class OfflineIndexBuilder {
 
   private static final int NUM_CLUSTERS = 512;
   private static final int NUM_DIMENSIONS = 14;
-  private static final int SQ8_LEVELS = 256;
+  private static final int PQ_M = 7;
+  private static final int PQ_SUB_D = 2;
+  private static final int PQ_CODEBOOK_SIZE = 256;
   private static final int TRAINING_SAMPLE_SIZE = 50_000;
   private static final int IVF_MAX_ITERATIONS = 25;
+  private static final int PQ_MAX_ITERATIONS = 20;
   private static final long RANDOM_SEED = 0xdeadbeefcafebabeL;
-
-  private static final long HEADER_SIZE = 56L;
-  private static final long CLUSTER_TABLE_ENTRY_SIZE = 8L;
 
   private OfflineIndexBuilder() {
   }
@@ -37,47 +37,47 @@ public final class OfflineIndexBuilder {
     final String outputPath = args[1];
 
     System.out.println("Loading dataset...");
-    final float[][] featureVectors = loadFeatureVectors(inputPath);
-    final byte[] fraudLabels = loadFraudLabels(inputPath);
-    final int numVectors = featureVectors.length;
-    System.out.println("  " + numVectors + " vectors, fraud=" + countFraud(fraudLabels));
-
-    System.out.println("Computing SQ8 quantization parameters...");
-    final float[] dimensionMinValues = computeDimensionMinValues(featureVectors);
-    final float[] dimensionMaxValues = computeDimensionMaxValues(featureVectors);
-    applyEpsilonToRanges(dimensionMinValues, dimensionMaxValues);
+    final float[][] vectors = loadFeatureVectors(inputPath);
+    final byte[] labels = loadFraudLabels(inputPath);
+    final int numVectors = vectors.length;
+    System.out.println("  " + numVectors + " vectors, fraud=" + countFraud(labels));
 
     System.out.println("K-Means++ init for IVF (K=" + NUM_CLUSTERS + ")...");
     final float[][] ivfCentroids = initializeKMeansPlusPlus(
-      featureVectors,
+      vectors,
       NUM_CLUSTERS,
       TRAINING_SAMPLE_SIZE,
       RANDOM_SEED
     );
 
     System.out.println("IVF Lloyd iterations...");
-    final int[] vectorClusterAssignments = new int[numVectors];
+    final int[] clusterAssignments = new int[numVectors];
     runLloydAlgorithm(
-      featureVectors,
+      vectors,
       ivfCentroids,
-      vectorClusterAssignments,
+      clusterAssignments,
       IVF_MAX_ITERATIONS
     );
 
-    System.out.println("Reordering vectors and labels by cluster...");
-    final int[] clusterCounts = computeClusterCounts(vectorClusterAssignments, numVectors);
-    final int[] clusterCumulativeCounts = computeClusterCumulativeCounts(clusterCounts);
-    final byte[] sq8QuantizedVectors = reorderAndQuantizeVectors(
-      featureVectors,
-      vectorClusterAssignments,
-      clusterCumulativeCounts,
-      dimensionMinValues,
-      dimensionMaxValues
+    System.out.println("Training PQ codebooks...");
+    final float[][][] pqCodebooks = trainProductQuantization(
+      vectors,
+      PQ_MAX_ITERATIONS,
+      RANDOM_SEED
     );
-    final byte[] reorderedLabels = reorderLabels(
-      fraudLabels,
-      vectorClusterAssignments,
-      clusterCumulativeCounts
+
+    System.out.println("Encoding vectors...");
+    final byte[][] pqCodes = encodeAllVectors(vectors, pqCodebooks);
+
+    System.out.println("Building inverted lists...");
+    final int[][] idsByCluster = new int[NUM_CLUSTERS][];
+    final byte[][] codesByCluster = new byte[NUM_CLUSTERS][];
+    buildInvertedLists(
+      numVectors,
+      clusterAssignments,
+      pqCodes,
+      idsByCluster,
+      codesByCluster
     );
 
     System.out.println("Writing index...");
@@ -85,15 +85,14 @@ public final class OfflineIndexBuilder {
       outputPath,
       numVectors,
       ivfCentroids,
-      dimensionMinValues,
-      dimensionMaxValues,
-      clusterCounts,
-      clusterCumulativeCounts,
-      sq8QuantizedVectors,
-      reorderedLabels
+      pqCodebooks,
+      idsByCluster,
+      codesByCluster,
+      vectors,
+      labels
     );
 
-    System.out.println("Done. Index written to " + outputPath);
+    System.out.println("Done.");
   }
 
   private static float[][] loadFeatureVectors(final String filePath) throws IOException {
@@ -167,11 +166,17 @@ public final class OfflineIndexBuilder {
     return Arrays.copyOf(labels, labelCount);
   }
 
-  private static int findByteArrayIndex(
-    final byte[] data,
-    final byte[] pattern,
-    final int fromIndex
-  ) {
+  private static int countFraud(final byte[] fraudLabels) {
+    int fraudCount = 0;
+    for (final byte label : fraudLabels) {
+      if (label == 1) {
+        fraudCount++;
+      }
+    }
+    return fraudCount;
+  }
+
+  private static int findByteArrayIndex(final byte[] data, final byte[] pattern, final int fromIndex) {
     final int patternLength = pattern.length;
     final int searchLimit = data.length - patternLength;
     for (int i = fromIndex; i <= searchLimit; i++) {
@@ -191,19 +196,13 @@ public final class OfflineIndexBuilder {
 
   private static int findNextDelimiter(final byte[] raw, final int fromIndex) {
     int position = fromIndex;
-    while (position < raw.length
-           && raw[position] != ','
-           && raw[position] != ']') {
+    while (position < raw.length && raw[position] != ',' && raw[position] != ']') {
       position++;
     }
     return position;
   }
 
-  private static float parseFloatFromBytes(
-    final byte[] raw,
-    final int startIndex,
-    final int endIndex
-  ) {
+  private static float parseFloatFromBytes(final byte[] raw, final int startIndex, final int endIndex) {
     float result = 0;
     boolean isNegative = false;
     int position = startIndex;
@@ -229,62 +228,13 @@ public final class OfflineIndexBuilder {
     return isNegative ? -result : result;
   }
 
-  private static int countFraud(final byte[] fraudLabels) {
-    int fraudCount = 0;
-    for (final byte label : fraudLabels) {
-      if (label == 1) {
-        fraudCount++;
-      }
-    }
-    return fraudCount;
-  }
-
-  private static float[] computeDimensionMinValues(final float[][] featureVectors) {
-    final int numVectors = featureVectors.length;
-    final float[] minValues = new float[NUM_DIMENSIONS];
-    Arrays.fill(minValues, Float.MAX_VALUE);
-    for (int i = 0; i < numVectors; i++) {
-      for (int d = 0; d < NUM_DIMENSIONS; d++) {
-        if (featureVectors[i][d] < minValues[d]) {
-          minValues[d] = featureVectors[i][d];
-        }
-      }
-    }
-    return minValues;
-  }
-
-  private static float[] computeDimensionMaxValues(final float[][] featureVectors) {
-    final int numVectors = featureVectors.length;
-    final float[] maxValues = new float[NUM_DIMENSIONS];
-    Arrays.fill(maxValues, Float.MIN_VALUE);
-    for (int i = 0; i < numVectors; i++) {
-      for (int d = 0; d < NUM_DIMENSIONS; d++) {
-        if (featureVectors[i][d] > maxValues[d]) {
-          maxValues[d] = featureVectors[i][d];
-        }
-      }
-    }
-    return maxValues;
-  }
-
-  private static void applyEpsilonToRanges(
-    final float[] minValues,
-    final float[] maxValues
-  ) {
-    for (int d = 0; d < NUM_DIMENSIONS; d++) {
-      if (maxValues[d] - minValues[d] < 1e-6f) {
-        maxValues[d] = minValues[d] + 1e-6f;
-      }
-    }
-  }
-
   private static float[][] initializeKMeansPlusPlus(
-    final float[][] featureVectors,
+    final float[][] vectors,
     final int numClusters,
     final int sampleSize,
     final long seed
   ) {
-    final int numVectors = featureVectors.length;
+    final int numVectors = vectors.length;
     final int effectiveSampleSize = Math.min(numVectors, sampleSize);
     final int[] sampleIndices = new int[effectiveSampleSize];
     final long[] randomState = {seed};
@@ -297,16 +247,13 @@ public final class OfflineIndexBuilder {
     final double[] minDistances = new double[effectiveSampleSize];
     Arrays.fill(minDistances, Double.POSITIVE_INFINITY);
 
-    centroids[0] = featureVectors[sampleIndices[0]].clone();
+    centroids[0] = vectors[sampleIndices[0]].clone();
 
     for (int clusterIndex = 1; clusterIndex < numClusters; clusterIndex++) {
       final float[] lastCentroid = centroids[clusterIndex - 1];
       double totalDistance = 0;
       for (int i = 0; i < effectiveSampleSize; i++) {
-        final double distance = computeSquaredEuclideanDistance(
-          featureVectors[sampleIndices[i]],
-          lastCentroid
-        );
+        final double distance = computeSquaredEuclideanDistance(vectors[sampleIndices[i]], lastCentroid);
         if (distance < minDistances[i]) {
           minDistances[i] = distance;
         }
@@ -323,18 +270,18 @@ public final class OfflineIndexBuilder {
           break;
         }
       }
-      centroids[clusterIndex] = featureVectors[sampleIndices[chosenIndex]].clone();
+      centroids[clusterIndex] = vectors[sampleIndices[chosenIndex]].clone();
     }
     return centroids;
   }
 
   private static void runLloydAlgorithm(
-    final float[][] featureVectors,
+    final float[][] vectors,
     final float[][] centroids,
-    final int[] vectorClusterAssignments,
+    final int[] assignments,
     final int maxIterations
   ) {
-    final int numVectors = featureVectors.length;
+    final int numVectors = vectors.length;
     final int numClusters = centroids.length;
     for (int iteration = 0; iteration < maxIterations; iteration++) {
       final AtomicInteger changeCount = new AtomicInteger(0);
@@ -342,17 +289,14 @@ public final class OfflineIndexBuilder {
         int bestCluster = 0;
         float bestDistance = Float.MAX_VALUE;
         for (int c = 0; c < numClusters; c++) {
-          final float distance = computeSquaredEuclideanDistance(
-            featureVectors[i],
-            centroids[c]
-          );
+          final float distance = computeSquaredEuclideanDistance(vectors[i], centroids[c]);
           if (distance < bestDistance) {
             bestDistance = distance;
             bestCluster = c;
           }
         }
-        if (vectorClusterAssignments[i] != bestCluster) {
-          vectorClusterAssignments[i] = bestCluster;
+        if (assignments[i] != bestCluster) {
+          assignments[i] = bestCluster;
           changeCount.incrementAndGet();
         }
       });
@@ -363,10 +307,10 @@ public final class OfflineIndexBuilder {
       final double[][] centroidSums = new double[numClusters][NUM_DIMENSIONS];
       final int[] clusterCounts = new int[numClusters];
       for (int i = 0; i < numVectors; i++) {
-        final int cluster = vectorClusterAssignments[i];
+        final int cluster = assignments[i];
         clusterCounts[cluster]++;
         for (int d = 0; d < NUM_DIMENSIONS; d++) {
-          centroidSums[cluster][d] += featureVectors[i][d];
+          centroidSums[cluster][d] += vectors[i][d];
         }
       }
       for (int c = 0; c < numClusters; c++) {
@@ -380,97 +324,164 @@ public final class OfflineIndexBuilder {
     }
   }
 
-  private static int[] computeClusterCounts(
-    final int[] vectorClusterAssignments,
-    final int numVectors
+  private static float[][][] trainProductQuantization(
+    final float[][] vectors,
+    final int maxIterations,
+    final long seed
+  ) {
+    final float[][][] codebooks = new float[PQ_M][PQ_CODEBOOK_SIZE][PQ_SUB_D];
+    final float[][] subVectors = new float[vectors.length][PQ_SUB_D];
+
+    for (int subspaceIndex = 0; subspaceIndex < PQ_M; subspaceIndex++) {
+      final int offset = subspaceIndex * PQ_SUB_D;
+      for (int i = 0; i < vectors.length; i++) {
+        subVectors[i][0] = vectors[i][offset];
+        subVectors[i][1] = vectors[i][offset + 1];
+      }
+      codebooks[subspaceIndex] = runKMeansOnSubspace(
+        subVectors,
+        PQ_CODEBOOK_SIZE,
+        seed + subspaceIndex,
+        maxIterations
+      );
+    }
+    return codebooks;
+  }
+
+  private static float[][] runKMeansOnSubspace(
+    final float[][] data,
+    final int numClusters,
+    final long seed,
+    final int maxIterations
+  ) {
+    final int numPoints = data.length;
+    final long[] randomState = {seed};
+    final float[][] centroids = new float[numClusters][PQ_SUB_D];
+    final boolean[] taken = new boolean[numPoints];
+    for (int i = 0; i < numClusters; i++) {
+      int index;
+      do {
+        randomState[0] = randomState[0] * 6364136223846793005L + 1442695040888963407L;
+        index = (int) ((randomState[0] >>> 33) % numPoints);
+      } while (taken[index]);
+      taken[index] = true;
+      centroids[i][0] = data[index][0];
+      centroids[i][1] = data[index][1];
+    }
+
+    final int[] assignments = new int[numPoints];
+    for (int iteration = 0; iteration < maxIterations; iteration++) {
+      int changeCount = 0;
+      for (int i = 0; i < numPoints; i++) {
+        float bestDistance = Float.MAX_VALUE;
+        int bestCluster = 0;
+        for (int c = 0; c < numClusters; c++) {
+          final float delta0 = data[i][0] - centroids[c][0];
+          final float delta1 = data[i][1] - centroids[c][1];
+          final float distance = delta0 * delta0 + delta1 * delta1;
+          if (distance < bestDistance) {
+            bestDistance = distance;
+            bestCluster = c;
+          }
+        }
+        if (assignments[i] != bestCluster) {
+          assignments[i] = bestCluster;
+          changeCount++;
+        }
+      }
+      if (iteration > 0 && changeCount == 0) {
+        break;
+      }
+      final double[][] clusterSums = new double[numClusters][PQ_SUB_D];
+      final int[] clusterCounts = new int[numClusters];
+      for (int i = 0; i < numPoints; i++) {
+        final int cluster = assignments[i];
+        clusterCounts[cluster]++;
+        clusterSums[cluster][0] += data[i][0];
+        clusterSums[cluster][1] += data[i][1];
+      }
+      for (int c = 0; c < numClusters; c++) {
+        if (clusterCounts[c] > 0) {
+          centroids[c][0] = (float) (clusterSums[c][0] / clusterCounts[c]);
+          centroids[c][1] = (float) (clusterSums[c][1] / clusterCounts[c]);
+        }
+      }
+    }
+    return centroids;
+  }
+
+  private static byte[][] encodeAllVectors(final float[][] vectors, final float[][][] codebooks) {
+    final int numVectors = vectors.length;
+    final byte[][] codes = new byte[numVectors][PQ_M];
+    for (int i = 0; i < numVectors; i++) {
+      for (int subspaceIndex = 0; subspaceIndex < PQ_M; subspaceIndex++) {
+        final int offset = subspaceIndex * PQ_SUB_D;
+        final float query0 = vectors[i][offset];
+        final float query1 = vectors[i][offset + 1];
+        float bestDistance = Float.MAX_VALUE;
+        int bestCentroid = 0;
+        for (int c = 0; c < PQ_CODEBOOK_SIZE; c++) {
+          final float delta0 = query0 - codebooks[subspaceIndex][c][0];
+          final float delta1 = query1 - codebooks[subspaceIndex][c][1];
+          final float distance = delta0 * delta0 + delta1 * delta1;
+          if (distance < bestDistance) {
+            bestDistance = distance;
+            bestCentroid = c;
+          }
+        }
+        codes[i][subspaceIndex] = (byte) bestCentroid;
+      }
+    }
+    return codes;
+  }
+
+  private static void buildInvertedLists(
+    final int numVectors,
+    final int[] assignments,
+    final byte[][] codes,
+    final int[][] idsByCluster,
+    final byte[][] codesByCluster
   ) {
     final int[] clusterCounts = new int[NUM_CLUSTERS];
     for (int i = 0; i < numVectors; i++) {
-      clusterCounts[vectorClusterAssignments[i]]++;
+      clusterCounts[assignments[i]]++;
     }
-    return clusterCounts;
-  }
-
-  private static int[] computeClusterCumulativeCounts(final int[] clusterCounts) {
-    final int[] cumulativeCounts = new int[NUM_CLUSTERS];
-    int runningTotal = 0;
     for (int c = 0; c < NUM_CLUSTERS; c++) {
-      cumulativeCounts[c] = runningTotal;
-      runningTotal += clusterCounts[c];
+      idsByCluster[c] = new int[clusterCounts[c]];
+      codesByCluster[c] = new byte[clusterCounts[c] * PQ_M];
     }
-    return cumulativeCounts;
-  }
-
-  private static byte[] reorderAndQuantizeVectors(
-    final float[][] featureVectors,
-    final int[] vectorClusterAssignments,
-    final int[] clusterCumulativeCounts,
-    final float[] dimensionMinValues,
-    final float[] dimensionMaxValues
-  ) {
-    final int numVectors = featureVectors.length;
-    final byte[] sq8QuantizedVectors = new byte[numVectors * NUM_DIMENSIONS];
     final int[] positionTracker = new int[NUM_CLUSTERS];
-    final float[] dimensionRanges = new float[NUM_DIMENSIONS];
-    for (int d = 0; d < NUM_DIMENSIONS; d++) {
-      dimensionRanges[d] = dimensionMaxValues[d] - dimensionMinValues[d];
-    }
-
     for (int i = 0; i < numVectors; i++) {
-      final int cluster = vectorClusterAssignments[i];
+      final int cluster = assignments[i];
       final int position = positionTracker[cluster]++;
-      final int globalIndex = clusterCumulativeCounts[cluster] + position;
-      final int byteOffset = globalIndex * NUM_DIMENSIONS;
-      for (int d = 0; d < NUM_DIMENSIONS; d++) {
-        final float normalizedValue = (featureVectors[i][d] - dimensionMinValues[d])
-                                      / dimensionRanges[d];
-        sq8QuantizedVectors[byteOffset + d] = (byte) Math.round(
-          normalizedValue * (SQ8_LEVELS - 1)
-        );
-      }
+      idsByCluster[cluster][position] = i;
+      System.arraycopy(codes[i], 0, codesByCluster[cluster], position * PQ_M, PQ_M);
     }
-    return sq8QuantizedVectors;
-  }
-
-  private static byte[] reorderLabels(
-    final byte[] fraudLabels,
-    final int[] vectorClusterAssignments,
-    final int[] clusterCumulativeCounts
-  ) {
-    final int numVectors = fraudLabels.length;
-    final byte[] reorderedLabels = new byte[numVectors];
-    final int[] positionTracker = new int[NUM_CLUSTERS];
-
-    for (int i = 0; i < numVectors; i++) {
-      final int cluster = vectorClusterAssignments[i];
-      final int position = positionTracker[cluster]++;
-      final int globalIndex = clusterCumulativeCounts[cluster] + position;
-      reorderedLabels[globalIndex] = fraudLabels[i];
-    }
-    return reorderedLabels;
   }
 
   private static void writeIndexToFile(
     final String filePath,
     final int numVectors,
     final float[][] ivfCentroids,
-    final float[] dimensionMinValues,
-    final float[] dimensionMaxValues,
-    final int[] clusterCounts,
-    final int[] clusterCumulativeCounts,
-    final byte[] sq8QuantizedVectors,
-    final byte[] reorderedLabels
+    final float[][][] pqCodebooks,
+    final int[][] idsByCluster,
+    final byte[][] codesByCluster,
+    final float[][] vectors,
+    final byte[] labels
   ) throws IOException {
-    final long centroidsSectionOffset = HEADER_SIZE;
-    final long quantizationParamsOffset = centroidsSectionOffset
-                                          + (long) NUM_CLUSTERS * NUM_DIMENSIONS * 4L;
-    final long clusterTableOffset = quantizationParamsOffset
-                                    + (long) NUM_DIMENSIONS * 2L * 4L;
-    final long vectorsSectionOffset = clusterTableOffset
-                                      + (long) NUM_CLUSTERS * CLUSTER_TABLE_ENTRY_SIZE;
-    final long labelsSectionOffset = vectorsSectionOffset
-                                     + (long) numVectors * NUM_DIMENSIONS;
-    final long totalFileSize = labelsSectionOffset + numVectors;
+    final long centroidsOffset = 36L;
+    final long codebooksOffset = centroidsOffset + (long) NUM_CLUSTERS * NUM_DIMENSIONS * 4L;
+    final long vectorsOffset = codebooksOffset + (long) PQ_M * PQ_CODEBOOK_SIZE * PQ_SUB_D * 4L + 4L;
+    final long labelsOffset = vectorsOffset + (long) numVectors * NUM_DIMENSIONS * 4L;
+
+    long invertedListsOffset = labelsOffset + numVectors;
+    final long[] clusterListOffsets = new long[NUM_CLUSTERS];
+    for (int c = 0; c < NUM_CLUSTERS; c++) {
+      clusterListOffsets[c] = invertedListsOffset;
+      invertedListsOffset += 4L + (long) idsByCluster[c].length * 4L
+                             + (long) idsByCluster[c].length * PQ_M;
+    }
+    final long totalFileSize = invertedListsOffset;
 
     try (final var randomAccessFile = new RandomAccessFile(filePath, "rw");
          final var fileChannel = randomAccessFile.getChannel()) {
@@ -481,51 +492,61 @@ public final class OfflineIndexBuilder {
       );
       buffer.order(ByteOrder.LITTLE_ENDIAN);
 
-      buffer.putInt(0, 0x52494E44);
-      buffer.putInt(4, 1);
-      buffer.putInt(8, NUM_CLUSTERS);
-      buffer.putInt(12, numVectors);
-      buffer.putLong(16, centroidsSectionOffset);
-      buffer.putLong(24, quantizationParamsOffset);
-      buffer.putLong(32, clusterTableOffset);
-      buffer.putLong(40, vectorsSectionOffset);
-      buffer.putLong(48, labelsSectionOffset);
+      buffer.putInt(0x52494E44);
+      buffer.putInt(1);
+      buffer.putInt(NUM_CLUSTERS);
+      buffer.putInt(numVectors);
+      buffer.putLong(vectorsOffset);
+      buffer.putLong(labelsOffset);
 
-      final int centroidsStart = (int) centroidsSectionOffset;
+      buffer.position((int) centroidsOffset);
       for (int c = 0; c < NUM_CLUSTERS; c++) {
         for (int d = 0; d < NUM_DIMENSIONS; d++) {
-          buffer.putFloat(centroidsStart + (c * NUM_DIMENSIONS + d) * 4, ivfCentroids[c][d]);
+          buffer.putFloat(ivfCentroids[c][d]);
         }
       }
 
-      final int paramsStart = (int) quantizationParamsOffset;
-      for (int d = 0; d < NUM_DIMENSIONS; d++) {
-        buffer.putFloat(paramsStart + (d * 2) * 4, dimensionMinValues[d]);
-        buffer.putFloat(paramsStart + (d * 2 + 1) * 4, dimensionMaxValues[d]);
+      buffer.position((int) codebooksOffset);
+      for (int m = 0; m < PQ_M; m++) {
+        for (int c = 0; c < PQ_CODEBOOK_SIZE; c++) {
+          for (int d = 0; d < PQ_SUB_D; d++) {
+            buffer.putFloat(pqCodebooks[m][c][d]);
+          }
+        }
       }
 
-      final int tableStart = (int) clusterTableOffset;
+      buffer.position((int) (vectorsOffset - 4L));
+      buffer.putInt(numVectors);
+      buffer.position((int) vectorsOffset);
+      for (int i = 0; i < numVectors; i++) {
+        for (int d = 0; d < NUM_DIMENSIONS; d++) {
+          buffer.putFloat(vectors[i][d]);
+        }
+      }
+
+      buffer.position((int) labelsOffset);
+      buffer.put(labels);
+
       for (int c = 0; c < NUM_CLUSTERS; c++) {
-        buffer.putInt(tableStart + c * 8, clusterCumulativeCounts[c]);
-        buffer.putInt(tableStart + c * 8 + 4, clusterCounts[c]);
-      }
-
-      final int vectorsStart = (int) vectorsSectionOffset;
-      for (int i = 0; i < sq8QuantizedVectors.length; i++) {
-        buffer.put(vectorsStart + i, sq8QuantizedVectors[i]);
-      }
-
-      final int labelsStart = (int) labelsSectionOffset;
-      for (int i = 0; i < reorderedLabels.length; i++) {
-        buffer.put(labelsStart + i, reorderedLabels[i]);
+        buffer.position((int) clusterListOffsets[c]);
+        buffer.putInt(idsByCluster[c].length);
+        for (final int id : idsByCluster[c]) {
+          buffer.putInt(id);
+        }
+        buffer.put(codesByCluster[c]);
       }
     }
+
+    System.out.println("  Index file size: " + totalFileSize + " bytes");
+    System.out.println("  Vectors section: " + vectorsOffset + " - " + labelsOffset
+                       + " (" + ((labelsOffset - vectorsOffset) / 1024 / 1024) + " MB)");
+    System.out.println("  Labels section: " + labelsOffset + " - " + clusterListOffsets[0]
+                       + " (" + numVectors + " bytes)");
+    System.out.println("  Inverted lists: " + clusterListOffsets[0] + " - " + totalFileSize
+                       + " (" + ((totalFileSize - clusterListOffsets[0]) / 1024 / 1024) + " MB)");
   }
 
-  private static float computeSquaredEuclideanDistance(
-    final float[] vectorA,
-    final float[] vectorB
-  ) {
+  private static float computeSquaredEuclideanDistance(final float[] vectorA, final float[] vectorB) {
     float sum = 0;
     for (int i = 0; i < NUM_DIMENSIONS; i++) {
       final float delta = vectorA[i] - vectorB[i];
