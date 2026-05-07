@@ -29,29 +29,29 @@ public final class FraudRequestParser {
   public float[] extractFeatureVector(final String j) {
     final float[] featureVector = featureVectorBuffer.get();
 
-    int txStart = sectionStart(j, 0, "transaction");
-    float txAmount = extractFloat(j, txStart, "amount");
-    int txInstallments = extractInt(j, txStart, "installments");
-    String reqAtStr = extractStr(j, txStart, "requested_at");
-    int txHour = tsHour(reqAtStr);
-    int txDow = tsDayOfWeek(reqAtStr);
-    long txEpoch = tsEpochSeconds(reqAtStr);
+    final int txStart = sectionStart(j, 0, "transaction");
+    final float txAmount = extractFloat(j, txStart, "amount");
+    final int txInstallments = extractInt(j, txStart, "installments");
+    final String reqAtStr = extractStr(j, txStart, "requested_at");
+    final int txHour = tsHour(reqAtStr);
+    final int txDow = tsDayOfWeek(reqAtStr);
+    final long txEpoch = tsEpochSeconds(reqAtStr);
 
-    int custStart = sectionStart(j, 0, "customer");
-    float custAvgAmount = extractFloat(j, custStart, "avg_amount");
-    int custTxCount = extractInt(j, custStart, "tx_count_24h");
+    final int custStart = sectionStart(j, 0, "customer");
+    final float custAvgAmount = extractFloat(j, custStart, "avg_amount");
+    final int custTxCount = extractInt(j, custStart, "tx_count_24h");
 
-    int merchStart = sectionStart(j, 0, "merchant");
-    String merchId = extractStr(j, merchStart, "id");
-    int mccCode = extractIntStr(j, merchStart, "mcc");
-    float merchAvg = extractFloat(j, merchStart, "avg_amount");
+    final int merchStart = sectionStart(j, 0, "merchant");
+    final String merchId = extractStr(j, merchStart, "id");
+    final int mccCode = extractIntStr(j, merchStart, "mcc");
+    final float merchAvg = extractFloat(j, merchStart, "avg_amount");
 
-    boolean unknownMerchant = !merchantIsKnown(j, custStart, "known_merchants", merchId);
+    final boolean unknownMerchant = !merchantIsKnown(j, custStart, "known_merchants", merchId);
 
-    int termStart = sectionStart(j, 0, "terminal");
-    boolean isOnline = extractBool(j, termStart, "is_online");
-    boolean cardPresent = extractBool(j, termStart, "card_present");
-    float kmFromHome = extractFloat(j, termStart, "km_from_home");
+    final int termStart = sectionStart(j, 0, "terminal");
+    final boolean isOnline = extractBool(j, termStart, "is_online");
+    final boolean cardPresent = extractBool(j, termStart, "card_present");
+    final float kmFromHome = extractFloat(j, termStart, "km_from_home");
 
     long minutesSinceLastTx = -1L;
     float distanceFromCurrentKm = -1f;
@@ -69,9 +69,11 @@ public final class FraudRequestParser {
 
     featureVector[0] = clampToUnitRange(txAmount / MAX_TRANSACTION_AMOUNT);
     featureVector[1] = clampToUnitRange(txInstallments / MAX_INSTALLMENT_COUNT);
-    featureVector[2] = clampToUnitRange((txAmount / custAvgAmount) / AMOUNT_TO_AVG_RATIO_CAP);
+    featureVector[2] = custAvgAmount > 0f
+      ? clampToUnitRange((txAmount / custAvgAmount) / AMOUNT_TO_AVG_RATIO_CAP)
+      : 0f;
     featureVector[3] = txHour / 23f;
-    featureVector[4] = txDow / 6f;
+    featureVector[4] = (txDow - 1) / 6f;
 
     if (ltIdx >= 0 && minutesSinceLastTx >= 0) {
       featureVector[5] = clampToUnitRange(minutesSinceLastTx / MAX_MINUTES_SINCE_LAST_TX);
