@@ -34,7 +34,6 @@ WORKDIR /app
 
 COPY --from=native-builder /build/build/*-runner /app/application
 COPY --from=index-builder /data/index.bin /app/data/index.bin
-COPY src/main/resources/mcc_risk.json /app/data/mcc_risk.json
 
 COPY --from=native-builder /usr/lib64/libz.so.1 /lib/x86_64-linux-gnu/libz.so.1
 
