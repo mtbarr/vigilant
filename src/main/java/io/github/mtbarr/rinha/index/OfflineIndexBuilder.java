@@ -17,7 +17,7 @@ import java.util.zip.GZIPInputStream;
 
 public final class OfflineIndexBuilder {
 
-  private static final int NUM_CLUSTERS = 1024;
+  private static final int NUM_CLUSTERS = 512;
   private static final int NUM_DIMENSIONS = 14;
   private static final int PQ_M = 7;
   private static final int PQ_SUB_D = 2;
@@ -377,30 +377,19 @@ public final class OfflineIndexBuilder {
     final int maxIterations
   ) {
     final int numPoints = data.length;
-    final long[] randomState = {seed};
-    final float[][] centroids = new float[numClusters][PQ_SUB_D];
-    final boolean[] taken = new boolean[numPoints];
-    for (int i = 0; i < numClusters; i++) {
-      int index;
-      do {
-        randomState[0] = randomState[0] * 6364136223846793005L + 1442695040888963407L;
-        index = (int) ((randomState[0] >>> 33) % numPoints);
-      } while (taken[index]);
-      taken[index] = true;
-      centroids[i][0] = data[index][0];
-      centroids[i][1] = data[index][1];
-    }
-
+    final java.util.Random rng = new java.util.Random(seed);
+    final float[][] centroids = initPlusPlus(data, numClusters, rng);
     final int[] assignments = new int[numPoints];
+
     for (int iteration = 0; iteration < maxIterations; iteration++) {
-      int changeCount = 0;
-      for (int i = 0; i < numPoints; i++) {
+      final java.util.concurrent.atomic.AtomicInteger changeCount = new java.util.concurrent.atomic.AtomicInteger(0);
+      java.util.stream.IntStream.range(0, numPoints).parallel().forEach(i -> {
         float bestDistance = Float.MAX_VALUE;
         int bestCluster = 0;
         for (int c = 0; c < numClusters; c++) {
-          final float delta0 = data[i][0] - centroids[c][0];
-          final float delta1 = data[i][1] - centroids[c][1];
-          final float distance = delta0 * delta0 + delta1 * delta1;
+          final float d0 = data[i][0] - centroids[c][0];
+          final float d1 = data[i][1] - centroids[c][1];
+          final float distance = d0 * d0 + d1 * d1;
           if (distance < bestDistance) {
             bestDistance = distance;
             bestCluster = c;
@@ -408,10 +397,10 @@ public final class OfflineIndexBuilder {
         }
         if (assignments[i] != bestCluster) {
           assignments[i] = bestCluster;
-          changeCount++;
+          changeCount.incrementAndGet();
         }
-      }
-      if (iteration > 0 && changeCount == 0) {
+      });
+      if (iteration > 0 && changeCount.get() == 0) {
         break;
       }
       final double[][] clusterSums = new double[numClusters][PQ_SUB_D];
@@ -424,12 +413,52 @@ public final class OfflineIndexBuilder {
       }
       for (int c = 0; c < numClusters; c++) {
         if (clusterCounts[c] > 0) {
-          centroids[c][0] = (float) (clusterSums[c][0] / clusterCounts[c]);
-          centroids[c][1] = (float) (clusterSums[c][1] / clusterCounts[c]);
+          final float inv = 1f / clusterCounts[c];
+          centroids[c][0] = (float) (clusterSums[c][0] * inv);
+          centroids[c][1] = (float) (clusterSums[c][1] * inv);
         }
       }
     }
     return centroids;
+  }
+
+  private static float[][] initPlusPlus(final float[][] data, final int K, final java.util.Random rng) {
+    final int N = data.length;
+    final float[][] centroids = new float[K][PQ_SUB_D];
+    final float[] distances = new float[N];
+
+    int first = rng.nextInt(N);
+    System.arraycopy(data[first], 0, centroids[0], 0, PQ_SUB_D);
+    for (int i = 0; i < N; i++) {
+      distances[i] = squaredDist(data[i], centroids[0]);
+    }
+
+    for (int k = 1; k < K; k++) {
+      double total = 0;
+      for (float d : distances) total += d;
+      double threshold = rng.nextDouble() * total;
+      double cumulative = 0;
+      int chosen = N - 1;
+      for (int i = 0; i < N; i++) {
+        cumulative += distances[i];
+        if (cumulative >= threshold) {
+          chosen = i;
+          break;
+        }
+      }
+      System.arraycopy(data[chosen], 0, centroids[k], 0, PQ_SUB_D);
+      for (int i = 0; i < N; i++) {
+        float d = squaredDist(data[i], centroids[k]);
+        if (d < distances[i]) distances[i] = d;
+      }
+    }
+    return centroids;
+  }
+
+  private static float squaredDist(final float[] a, final float[] b) {
+    final float d0 = a[0] - b[0];
+    final float d1 = a[1] - b[1];
+    return d0 * d0 + d1 * d1;
   }
 
   private static byte[][] encodeAllVectors(final float[][] vectors, final float[][][] codebooks) {
