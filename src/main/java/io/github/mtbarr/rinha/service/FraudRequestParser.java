@@ -4,246 +4,463 @@ import jakarta.enterprise.context.ApplicationScoped;
 import java.nio.charset.StandardCharsets;
 
 @ApplicationScoped
-public class FraudRequestParser {
+public final class FraudRequestParser {
 
-  private static final byte[] FIELD_AMOUNT = encode("amount");
-  private static final byte[] FIELD_INSTALLMENTS = encode("installments");
-  private static final byte[] FIELD_REQUESTED_AT = encode("requested_at");
-  private static final byte[] FIELD_AVG_AMOUNT = encode("avg_amount");
-  private static final byte[] FIELD_TX_COUNT_24H = encode("tx_count_24h");
-  private static final byte[] FIELD_KNOWN_MERCHANTS = encode("known_merchants");
-  private static final byte[] FIELD_MCC = encode("mcc");
-  private static final byte[] FIELD_ID = encode("id");
-  private static final byte[] FIELD_IS_ONLINE = encode("is_online");
-  private static final byte[] FIELD_CARD_PRESENT = encode("card_present");
-  private static final byte[] FIELD_KM_FROM_HOME = encode("km_from_home");
-  private static final byte[] FIELD_TIMESTAMP = encode("timestamp");
-  private static final byte[] FIELD_KM_FROM_CURRENT = encode("km_from_current");
+  private static final int FEATURE_VECTOR_DIMENSIONS = 14;
 
-  private static final float NORMALIZATION_MAX_AMOUNT = 10_000f;
-  private static final float NORMALIZATION_MAX_INSTALLMENTS = 12f;
-  private static final float NORMALIZATION_AMOUNT_VS_AVERAGE_RATIO = 10f;
-  private static final float NORMALIZATION_MAX_MINUTES = 1440f;
-  private static final float NORMALIZATION_MAX_DISTANCE = 1000f;
-  private static final float NORMALIZATION_MAX_TRANSACTION_COUNT = 20f;
-  private static final float NORMALIZATION_MERCHANT_AMOUNT_DIVISOR = 10_000f;
+  private static final float MAX_TRANSACTION_AMOUNT = 10_000f;
+  private static final float MAX_INSTALLMENT_COUNT = 12f;
+  private static final float AMOUNT_TO_AVG_RATIO_CAP = 10f;
+  private static final float MAX_MINUTES_SINCE_LAST_TX = 1440f;
+  private static final float MAX_DISTANCE_KM = 1000f;
+  private static final float MAX_TRANSACTIONS_24H = 20f;
+  private static final float MAX_MERCHANT_AVG_AMOUNT = 10_000f;
 
-  private static byte[] encode(final String text) {
-    return text.getBytes(StandardCharsets.US_ASCII);
-  }
+  private static final int[] DAY_OF_WEEK_MONTH_TABLE = {0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4};
 
-  public float[] extractVector(final byte[] requestBody) {
-    final ByteCursor cursor = new ByteCursor(requestBody);
+  private static final byte[] KEY_AMOUNT = encodeJsonKey("amount");
+  private static final byte[] KEY_INSTALLMENTS = encodeJsonKey("installments");
+  private static final byte[] KEY_REQUESTED_AT = encodeJsonKey("requested_at");
+  private static final byte[] KEY_CUSTOMER = encodeJsonKey("customer");
+  private static final byte[] KEY_AVG_AMOUNT = encodeJsonKey("avg_amount");
+  private static final byte[] KEY_TX_COUNT_24H = encodeJsonKey("tx_count_24h");
+  private static final byte[] KEY_MERCHANT = encodeJsonKey("merchant");
+  private static final byte[] KEY_MERCHANT_ID = encodeJsonKey("id");
+  private static final byte[] KEY_MCC = encodeJsonKey("mcc");
+  private static final byte[] KEY_TERMINAL = encodeJsonKey("terminal");
+  private static final byte[] KEY_IS_ONLINE = encodeJsonKey("is_online");
+  private static final byte[] KEY_CARD_PRESENT = encodeJsonKey("card_present");
+  private static final byte[] KEY_KM_FROM_HOME = encodeJsonKey("km_from_home");
+  private static final byte[] KEY_KNOWN_MERCHANTS = encodeJsonKey("known_merchants");
+  private static final byte[] KEY_LAST_TRANSACTION = encodeJsonKey("last_transaction");
+  private static final byte[] KEY_TIMESTAMP = encodeJsonKey("timestamp");
+  private static final byte[] KEY_KM_FROM_CURRENT = encodeJsonKey("km_from_current");
 
-    cursor.skipFieldValue();
+  private static final byte CHAR_QUOTE = '"';
+  private static final byte CHAR_COLON = ':';
+  private static final byte CHAR_OPEN_BRACE = '{';
+  private static final byte CHAR_OPEN_BRACKET = '[';
+  private static final byte CHAR_CLOSE_BRACKET = ']';
+  private static final byte CHAR_MINUS = '-';
+  private static final byte CHAR_DOT = '.';
+  private static final byte CHAR_DIGIT_ZERO = '0';
+  private static final byte CHAR_DIGIT_NINE = '9';
 
-    cursor.skipToField(FIELD_AMOUNT);
-    final float transactionAmount = cursor.parseFloat();
+  private final ThreadLocal<float[]> featureVectorBuffer = ThreadLocal.withInitial(
+    () -> new float[FEATURE_VECTOR_DIMENSIONS]
+  );
 
-    cursor.skipToField(FIELD_INSTALLMENTS);
-    final int installmentCount = cursor.parseInt();
+  public float[] extractFeatureVector(final byte[] jsonPayload) {
+    final float[] featureVector = featureVectorBuffer.get();
 
-    cursor.skipToField(FIELD_REQUESTED_AT);
-    final int transactionYear = cursor.parseYear();
-    cursor.advance();
-    final int transactionMonth = cursor.parseTwoDigits();
-    cursor.advance();
-    final int transactionDay = cursor.parseTwoDigits();
-    cursor.advance();
-    final int transactionHour = cursor.parseTwoDigits();
-    cursor.advance();
-    final int transactionMinute = cursor.parseTwoDigits();
-    cursor.skipStringEnd();
+    final int amountValueStart = findNumericValueStart(jsonPayload, KEY_AMOUNT, 0);
+    final float transactionAmount = parseFloatValue(jsonPayload, amountValueStart);
 
-    cursor.skipToField(FIELD_AVG_AMOUNT);
-    final float customerAverageAmount = cursor.parseFloat();
-
-    cursor.skipToField(FIELD_TX_COUNT_24H);
-    final int recentTransactionCount = cursor.parseInt();
-
-    cursor.skipToField(FIELD_KNOWN_MERCHANTS);
-    cursor.skipToArrayStart();
-    final int merchantListStart = cursor.position();
-    cursor.skipToArrayEnd();
-    final int merchantListEnd = cursor.position();
-
-    cursor.skipToField(FIELD_ID);
-    final byte[] currentMerchantId = cursor.parseString();
-
-    cursor.skipToField(FIELD_MCC);
-    final int merchantCategoryCode = cursor.parseQuotedInt();
-
-    cursor.skipToField(FIELD_AVG_AMOUNT);
-    final float merchantAverageAmount = cursor.parseFloat();
-
-    cursor.skipToField(FIELD_IS_ONLINE);
-    final boolean isOnlineTransaction = cursor.parseBoolean();
-
-    cursor.skipToField(FIELD_CARD_PRESENT);
-    final boolean isCardPresent = cursor.parseBoolean();
-
-    cursor.skipToField(FIELD_KM_FROM_HOME);
-    final float homeDistanceKilometers = cursor.parseFloat();
-
-    final boolean hasPreviousTransaction;
-    final int minutesSincePrevious;
-    final float distanceFromPrevious;
-
-    if (cursor.skipToOptionalField(FIELD_TIMESTAMP)) {
-      parseTransactionTimestamp(cursor);
-    } else {
-      cursor.skipPastNull();
-    }
-    hasPreviousTransaction = cursor.hasValue();
-
-    if (hasPreviousTransaction) {
-      final int previousYear = cursor.parseYear();
-      cursor.advance();
-      final int previousMonth = cursor.parseTwoDigits();
-      cursor.advance();
-      final int previousDay = cursor.parseTwoDigits();
-      cursor.advance();
-      final int previousHour = cursor.parseTwoDigits();
-      cursor.advance();
-      final int previousMinute = cursor.parseTwoDigits();
-      cursor.skipStringEnd();
-
-      cursor.skipToField(FIELD_KM_FROM_CURRENT);
-      distanceFromPrevious = cursor.parseFloat();
-
-      minutesSincePrevious = computeMinutesBetween(
-        previousYear, previousMonth, previousDay, previousHour, previousMinute,
-        transactionYear, transactionMonth, transactionDay, transactionHour, transactionMinute
-      );
-    } else {
-      minutesSincePrevious = 0;
-      distanceFromPrevious = 0f;
-    }
-
-    final boolean isUnknownMerchant = !isMerchantInList(
-      requestBody, merchantListStart, merchantListEnd, currentMerchantId);
-
-    return assembleFeatureVector(
-      transactionAmount,
-      installmentCount,
-      customerAverageAmount,
-      transactionHour,
-      dayOfWeek(transactionYear, transactionMonth, transactionDay),
-      hasPreviousTransaction,
-      minutesSincePrevious,
-      distanceFromPrevious,
-      homeDistanceKilometers,
-      recentTransactionCount,
-      isOnlineTransaction,
-      isCardPresent,
-      isUnknownMerchant,
-      merchantCategoryCode,
-      merchantAverageAmount
+    final int installmentsValueStart = findNumericValueStart(
+      jsonPayload,
+      KEY_INSTALLMENTS,
+      amountValueStart
     );
-  }
+    final int installmentCount = parseIntegerValue(jsonPayload, installmentsValueStart);
 
-  private void parseTransactionTimestamp(final ByteCursor cursor) {
-    cursor.markHasValue();
-  }
+    final int requestedAtValueStart = findStringValueStart(
+      jsonPayload,
+      KEY_REQUESTED_AT,
+      installmentsValueStart
+    );
+    final int requestedAtValueEnd = findStringValueEnd(jsonPayload, requestedAtValueStart);
+    final int transactionHour = extractHourFromTimestamp(jsonPayload, requestedAtValueStart);
+    final int transactionDayOfWeek = extractDayOfWeekFromTimestamp(jsonPayload, requestedAtValueStart);
+    final long requestedAtEpochSeconds = parseEpochSecondsFromTimestamp(jsonPayload, requestedAtValueStart);
 
-  private static float[] assembleFeatureVector(
-    final float amount,
-    final int installments,
-    final float customerAverage,
-    final int hour,
-    final float dayOfWeek,
-    final boolean hasPrevious,
-    final int minutesSincePrevious,
-    final float kilometersFromPrevious,
-    final float kilometersFromHome,
-    final int transactionCount24h,
-    final boolean isOnline,
-    final boolean isCardPresent,
-    final boolean isUnknownMerchant,
-    final int merchantCategoryCode,
-    final float merchantAverageAmount
-  ) {
+    final int customerSectionStart = findObjectSectionStart(
+      jsonPayload,
+      KEY_CUSTOMER,
+      requestedAtValueEnd
+    );
+    final int customerAvgAmountStart = findNumericValueStart(
+      jsonPayload,
+      KEY_AVG_AMOUNT,
+      customerSectionStart
+    );
+    final float customerAverageAmount = parseFloatValue(jsonPayload, customerAvgAmountStart);
+    final int customerTxCount24hStart = findNumericValueStart(
+      jsonPayload,
+      KEY_TX_COUNT_24H,
+      customerSectionStart
+    );
+    final int customerTransactionCount24h = parseIntegerValue(
+      jsonPayload,
+      customerTxCount24hStart
+    );
 
-    final float[] featureVector = new float[14];
+    final int merchantSectionStart = findObjectSectionStart(
+      jsonPayload,
+      KEY_MERCHANT,
+      customerSectionStart
+    );
+    final int merchantIdValueStart = findStringValueStart(
+      jsonPayload,
+      KEY_MERCHANT_ID,
+      merchantSectionStart
+    );
+    final int merchantIdValueEnd = findStringValueEnd(jsonPayload, merchantIdValueStart);
+    final int mccValueStart = findNumericValueStart(jsonPayload, KEY_MCC, merchantSectionStart);
+    final int merchantCategoryCode = parseMccValue(jsonPayload, mccValueStart);
+    final int merchantAvgAmountStart = findNumericValueStart(
+      jsonPayload,
+      KEY_AVG_AMOUNT,
+      merchantSectionStart
+    );
+    final float merchantAverageAmount = parseFloatValue(jsonPayload, merchantAvgAmountStart);
 
-    featureVector[0] = clamp(amount / NORMALIZATION_MAX_AMOUNT);
-    featureVector[1] = clamp(installments / NORMALIZATION_MAX_INSTALLMENTS);
-    featureVector[2] = clamp((amount / customerAverage) / NORMALIZATION_AMOUNT_VS_AVERAGE_RATIO);
-    featureVector[3] = clamp(hour / 23f);
-    featureVector[4] = clamp(dayOfWeek / 6f);
+    final int terminalSectionStart = findObjectSectionStart(
+      jsonPayload,
+      KEY_TERMINAL,
+      merchantSectionStart
+    );
+    final int isOnlineValueStart = findNumericValueStart(
+      jsonPayload,
+      KEY_IS_ONLINE,
+      terminalSectionStart
+    );
+    final boolean isOnlineTransaction = parseBooleanValue(jsonPayload, isOnlineValueStart);
+    final int cardPresentValueStart = findNumericValueStart(
+      jsonPayload,
+      KEY_CARD_PRESENT,
+      terminalSectionStart
+    );
+    final boolean isCardPresent = parseBooleanValue(jsonPayload, cardPresentValueStart);
+    final int kmFromHomeValueStart = findNumericValueStart(
+      jsonPayload,
+      KEY_KM_FROM_HOME,
+      terminalSectionStart
+    );
+    final float distanceFromHomeKm = parseFloatValue(jsonPayload, kmFromHomeValueStart);
 
-    if (hasPrevious) {
-      featureVector[5] = clamp(minutesSincePrevious / NORMALIZATION_MAX_MINUTES);
-      featureVector[6] = clamp(kilometersFromPrevious / NORMALIZATION_MAX_DISTANCE);
+    final boolean isUnknownMerchant = !isMerchantInKnownList(
+      jsonPayload,
+      customerSectionStart,
+      merchantIdValueStart,
+      merchantIdValueEnd
+    );
+
+    final int lastTransactionKeyPos = findByteArrayIndex(
+      jsonPayload,
+      KEY_LAST_TRANSACTION,
+      terminalSectionStart
+    );
+    final int lastTransactionSectionStart = lastTransactionKeyPos >= 0
+      ? findSingleByteIndex(jsonPayload, CHAR_OPEN_BRACE, lastTransactionKeyPos)
+      : -1;
+    final boolean hasLastTransaction = lastTransactionSectionStart > 0;
+
+    final long minutesSinceLastTransaction;
+    final float distanceFromCurrentKm;
+
+    if (hasLastTransaction) {
+      final int lastTimestampValueStart = findStringValueStart(
+        jsonPayload,
+        KEY_TIMESTAMP,
+        lastTransactionSectionStart
+      );
+      final long lastTransactionEpochSeconds = parseEpochSecondsFromTimestamp(
+        jsonPayload,
+        lastTimestampValueStart
+      );
+      minutesSinceLastTransaction = Math.max(
+        0L,
+        requestedAtEpochSeconds - lastTransactionEpochSeconds
+      ) / 60L;
+      final int kmFromCurrentValueStart = findNumericValueStart(
+        jsonPayload,
+        KEY_KM_FROM_CURRENT,
+        lastTransactionSectionStart
+      );
+      distanceFromCurrentKm = parseFloatValue(jsonPayload, kmFromCurrentValueStart);
+    } else {
+      minutesSinceLastTransaction = -1L;
+      distanceFromCurrentKm = -1f;
+    }
+
+    featureVector[0] = clampToUnitRange(transactionAmount / MAX_TRANSACTION_AMOUNT);
+    featureVector[1] = clampToUnitRange(installmentCount / MAX_INSTALLMENT_COUNT);
+    featureVector[2] = clampToUnitRange(
+      (transactionAmount / customerAverageAmount) / AMOUNT_TO_AVG_RATIO_CAP
+    );
+    featureVector[3] = transactionHour / 23f;
+    featureVector[4] = transactionDayOfWeek / 6f;
+
+    if (hasLastTransaction) {
+      featureVector[5] = clampToUnitRange(minutesSinceLastTransaction / MAX_MINUTES_SINCE_LAST_TX);
+      featureVector[6] = clampToUnitRange(distanceFromCurrentKm / MAX_DISTANCE_KM);
     } else {
       featureVector[5] = -1f;
       featureVector[6] = -1f;
     }
 
-    featureVector[7] = clamp(kilometersFromHome / NORMALIZATION_MAX_DISTANCE);
-    featureVector[8] = clamp(transactionCount24h / NORMALIZATION_MAX_TRANSACTION_COUNT);
-    featureVector[9] = isOnline ? 1f : 0f;
+    featureVector[7] = clampToUnitRange(distanceFromHomeKm / MAX_DISTANCE_KM);
+    featureVector[8] = clampToUnitRange(customerTransactionCount24h / MAX_TRANSACTIONS_24H);
+    featureVector[9] = isOnlineTransaction ? 1f : 0f;
     featureVector[10] = isCardPresent ? 1f : 0f;
     featureVector[11] = isUnknownMerchant ? 1f : 0f;
-    featureVector[12] = mccRiskFor(merchantCategoryCode);
-    featureVector[13] = clamp(merchantAverageAmount / NORMALIZATION_MERCHANT_AMOUNT_DIVISOR);
+    featureVector[12] = computeMccRiskScore(merchantCategoryCode);
+    featureVector[13] = clampToUnitRange(merchantAverageAmount / MAX_MERCHANT_AVG_AMOUNT);
 
     return featureVector;
   }
 
-
-  private static boolean isMerchantInList(
-    final byte[] source,
-    final int rangeStart,
-    final int rangeEnd,
-    final byte[] targetMerchant
+  private static int findObjectSectionStart(
+    final byte[] jsonPayload,
+    final byte[] jsonKey,
+    final int searchFrom
   ) {
-    int position = rangeStart;
-    while (position < rangeEnd) {
-      if (source[position] == '"') {
-        position++;
-        final int valueStart = position;
-        while (position < rangeEnd && source[position] != '"') {
-          position++;
-        }
-        if (bytesMatch(source, valueStart, position, targetMerchant)) {
-          return true;
-        }
-        position++;
-      } else {
+    final int keyPosition = findByteArrayIndex(jsonPayload, jsonKey, searchFrom);
+    final int colonPosition = findSingleByteIndex(jsonPayload, CHAR_COLON, keyPosition);
+    return findSingleByteIndex(jsonPayload, CHAR_OPEN_BRACE, colonPosition);
+  }
+
+  private static int findNumericValueStart(
+    final byte[] jsonPayload,
+    final byte[] jsonKey,
+    final int searchFrom
+  ) {
+    final int keyPosition = findByteArrayIndex(jsonPayload, jsonKey, searchFrom);
+    final int colonPosition = findSingleByteIndex(jsonPayload, CHAR_COLON, keyPosition) + 1;
+    int valuePosition = colonPosition;
+    while (jsonPayload[valuePosition] <= ' ') {
+      valuePosition++;
+    }
+    return valuePosition;
+  }
+
+  private static int findStringValueStart(
+    final byte[] jsonPayload,
+    final byte[] jsonKey,
+    final int searchFrom
+  ) {
+    final int keyPosition = findByteArrayIndex(jsonPayload, jsonKey, searchFrom);
+    final int colonPosition = findSingleByteIndex(jsonPayload, CHAR_COLON, keyPosition) + 1;
+    int valuePosition = colonPosition;
+    while (jsonPayload[valuePosition] <= ' ') {
+      valuePosition++;
+    }
+    return valuePosition + 1;
+  }
+
+  private static int findStringValueEnd(
+    final byte[] jsonPayload,
+    final int valueStart
+  ) {
+    return findSingleByteIndex(jsonPayload, CHAR_QUOTE, valueStart);
+  }
+
+  private static float parseFloatValue(final byte[] jsonPayload, final int valueStart) {
+    int position = valueStart;
+    final boolean isNegative = jsonPayload[position] == CHAR_MINUS;
+    if (isNegative) {
+      position++;
+    }
+
+    float integerPart = 0f;
+    while (jsonPayload[position] >= CHAR_DIGIT_ZERO
+           && jsonPayload[position] <= CHAR_DIGIT_NINE) {
+      integerPart = integerPart * 10f + (jsonPayload[position] - CHAR_DIGIT_ZERO);
+      position++;
+    }
+
+    if (jsonPayload[position] == CHAR_DOT) {
+      position++;
+      float fractionalPart = 0f;
+      float fractionalDivisor = 1f;
+      while (jsonPayload[position] >= CHAR_DIGIT_ZERO
+             && jsonPayload[position] <= CHAR_DIGIT_NINE) {
+        fractionalPart = fractionalPart * 10f + (jsonPayload[position] - CHAR_DIGIT_ZERO);
+        fractionalDivisor *= 10f;
         position++;
       }
+      integerPart += fractionalPart / fractionalDivisor;
+    }
+
+    return isNegative ? -integerPart : integerPart;
+  }
+
+  private static int parseIntegerValue(final byte[] jsonPayload, final int valueStart) {
+    int position = valueStart;
+    int result = 0;
+    while (jsonPayload[position] >= CHAR_DIGIT_ZERO
+           && jsonPayload[position] <= CHAR_DIGIT_NINE) {
+      result = result * 10 + (jsonPayload[position] - CHAR_DIGIT_ZERO);
+      position++;
+    }
+    return result;
+  }
+
+  private static int parseMccValue(final byte[] jsonPayload, final int valueStart) {
+    int position = valueStart;
+    if (jsonPayload[position] == CHAR_QUOTE) {
+      position++;
+    }
+    int result = 0;
+    while (jsonPayload[position] >= CHAR_DIGIT_ZERO
+           && jsonPayload[position] <= CHAR_DIGIT_NINE) {
+      result = result * 10 + (jsonPayload[position] - CHAR_DIGIT_ZERO);
+      position++;
+    }
+    return result;
+  }
+
+  private static boolean parseBooleanValue(final byte[] jsonPayload, final int valueStart) {
+    return jsonPayload[valueStart] == 't';
+  }
+
+  private static boolean isMerchantInKnownList(
+    final byte[] jsonPayload,
+    final int searchFrom,
+    final int targetIdStart,
+    final int targetIdEnd
+  ) {
+    final int knownMerchantsKeyPos = findByteArrayIndex(
+      jsonPayload,
+      KEY_KNOWN_MERCHANTS,
+      searchFrom
+    );
+    if (knownMerchantsKeyPos < 0) {
+      return false;
+    }
+    final int arrayOpenBracketPos = findSingleByteIndex(
+      jsonPayload,
+      CHAR_OPEN_BRACKET,
+      knownMerchantsKeyPos
+    );
+    if (arrayOpenBracketPos < 0) {
+      return false;
+    }
+    final int arrayCloseBracketPos = findSingleByteIndex(
+      jsonPayload,
+      CHAR_CLOSE_BRACKET,
+      arrayOpenBracketPos
+    );
+    if (arrayCloseBracketPos < 0) {
+      return false;
+    }
+
+    final int targetIdLength = targetIdEnd - targetIdStart;
+    int scanPosition = arrayOpenBracketPos + 1;
+    while (scanPosition < arrayCloseBracketPos) {
+      final int quoteStartPosition = findSingleByteIndex(
+        jsonPayload,
+        CHAR_QUOTE,
+        scanPosition
+      );
+      if (quoteStartPosition < 0 || quoteStartPosition >= arrayCloseBracketPos) {
+        break;
+      }
+      final int quoteEndPosition = findSingleByteIndex(
+        jsonPayload,
+        CHAR_QUOTE,
+        quoteStartPosition + 1
+      );
+      if (quoteEndPosition < 0) {
+        break;
+      }
+      final int candidateLength = quoteEndPosition - quoteStartPosition - 1;
+      if (candidateLength == targetIdLength
+          && byteRegionMatches(
+            jsonPayload,
+            quoteStartPosition + 1,
+            jsonPayload,
+            targetIdStart,
+            targetIdLength
+          )) {
+        return true;
+      }
+      scanPosition = quoteEndPosition + 1;
     }
     return false;
   }
 
-  private static boolean bytesMatch(final byte[] source, final int sourceStart,
-                                    final int sourceEnd, final byte[] target) {
-    final int length = sourceEnd - sourceStart;
-    if (length != target.length) {
-      return false;
-    }
-    for (int index = 0; index < length; index++) {
-      if (source[sourceStart + index] != target[index]) {
-        return false;
-      }
-    }
-    return true;
+  private static int extractHourFromTimestamp(
+    final byte[] timestampBytes,
+    final int timestampStart
+  ) {
+    return (timestampBytes[timestampStart + 11] - CHAR_DIGIT_ZERO) * 10
+      + (timestampBytes[timestampStart + 12] - CHAR_DIGIT_ZERO);
   }
 
-
-  private static float clamp(final float value) {
-    if (value < 0f) {
-      return 0f;
+  private static int extractDayOfWeekFromTimestamp(
+    final byte[] timestampBytes,
+    final int timestampStart
+  ) {
+    final int year = parseDigitSequence(timestampBytes, timestampStart, 4);
+    int month = parseDigitSequence(timestampBytes, timestampStart + 5, 2);
+    final int day = parseDigitSequence(timestampBytes, timestampStart + 8, 2);
+    int adjustedYear = year;
+    if (month < 3) {
+      adjustedYear--;
     }
-    if (value > 1f) {
-      return 1f;
+    final int rawDayOfWeek = (adjustedYear
+      + adjustedYear / 4
+      - adjustedYear / 100
+      + adjustedYear / 400
+      + DAY_OF_WEEK_MONTH_TABLE[month - 1]
+      + day) % 7;
+    return (rawDayOfWeek + 6) % 7;
+  }
+
+  private static long parseEpochSecondsFromTimestamp(
+    final byte[] timestampBytes,
+    final int timestampStart
+  ) {
+    final int year = parseDigitSequence(timestampBytes, timestampStart, 4);
+    int month = parseDigitSequence(timestampBytes, timestampStart + 5, 2);
+    final int day = parseDigitSequence(timestampBytes, timestampStart + 8, 2);
+    final int hour = parseDigitSequence(timestampBytes, timestampStart + 11, 2);
+    final int minute = parseDigitSequence(timestampBytes, timestampStart + 14, 2);
+    final int second = parseDigitSequence(timestampBytes, timestampStart + 17, 2);
+
+    int adjustedYear = year;
+    int adjustedMonth = month;
+    if (month <= 2) {
+      adjustedYear--;
+      adjustedMonth += 9;
+    } else {
+      adjustedMonth -= 3;
+    }
+
+    final long era = (adjustedYear >= 0 ? adjustedYear : adjustedYear - 399) / 400L;
+    final int yearOfEra = adjustedYear - (int) era * 400;
+    final int dayOfYear = (153 * adjustedMonth + 2) / 5 + day - 1;
+    final int dayOfEra = yearOfEra * 365
+      + yearOfEra / 4
+      - yearOfEra / 100
+      + dayOfYear;
+    final long daysSinceEpoch = era * 146097L + dayOfEra - 719468L;
+
+    return daysSinceEpoch * 86400L
+      + hour * 3600L
+      + minute * 60L
+      + second;
+  }
+
+  private static int parseDigitSequence(
+    final byte[] textBytes,
+    final int sequenceStart,
+    final int digitCount
+  ) {
+    int value = 0;
+    for (int i = 0; i < digitCount; i++) {
+      value = value * 10 + (textBytes[sequenceStart + i] - CHAR_DIGIT_ZERO);
     }
     return value;
   }
 
-  static float mccRiskFor(final int mccCode) {
-    return switch (mccCode) {
+  private static float clampToUnitRange(final float value) {
+    return value < 0f ? 0f : (value > 1f ? 1f : value);
+  }
+
+  private static float computeMccRiskScore(final int merchantCategoryCode) {
+    return switch (merchantCategoryCode) {
       case 5411 -> 0.15f;
       case 5812 -> 0.30f;
       case 5912 -> 0.20f;
@@ -257,299 +474,67 @@ public class FraudRequestParser {
     };
   }
 
-
-  static float dayOfWeek(final int year, final int month, final int day) {
-    final int yearOffset = month < 3 ? year - 1 : year;
-    final int monthOffset = month < 3 ? month + 12 : month;
-    final int century = yearOffset / 100;
-    final int yearInCentury = yearOffset % 100;
-    final int zellerResult = (day + (13 * (monthOffset + 1)) / 5 + yearInCentury
-                              + yearInCentury / 4 + century / 4 - 2 * century) % 7;
-    return (zellerResult + 5) % 7;
+  private static int findSingleByteIndex(
+    final byte[] data,
+    final int targetByte,
+    final int fromIndex
+  ) {
+    for (int i = fromIndex; i < data.length; i++) {
+      if (data[i] == targetByte) {
+        return i;
+      }
+    }
+    return -1;
   }
 
-  static int computeMinutesBetween(
-    final int year1, final int month1, final int day1,
-    final int hour1, final int minute1,
-    final int year2, final int month2, final int day2,
-    final int hour2, final int minute2) {
-    final long epochDays1 = daysSinceEpoch(year1, month1, day1);
-    final long epochDays2 = daysSinceEpoch(year2, month2, day2);
-    final long totalMinutes1 = epochDays1 * 1440 + hour1 * 60L + minute1;
-    final long totalMinutes2 = epochDays2 * 1440 + hour2 * 60L + minute2;
-    final long difference = totalMinutes2 - totalMinutes1;
-    return difference > 0 ? (int) difference : 0;
+  private static int findByteArrayIndex(
+    final byte[] data,
+    final byte[] pattern,
+    final int fromIndex
+  ) {
+    final int patternLength = pattern.length;
+    final int searchLimit = data.length - patternLength;
+    for (int i = fromIndex; i <= searchLimit; i++) {
+      boolean isMatch = true;
+      for (int j = 0; j < patternLength; j++) {
+        if (data[i + j] != pattern[j]) {
+          isMatch = false;
+          break;
+        }
+      }
+      if (isMatch) {
+        return i;
+      }
+    }
+    return -1;
   }
 
-  private static long daysSinceEpoch(final int year, final int month, final int day) {
-    final int yearOffset = month <= 2 ? year - 1 : year;
-    final int era = yearOffset >= 0 ? yearOffset / 400 : (yearOffset - 399) / 400;
-    final int yearOfEra = yearOffset - era * 400;
-    final int monthOffset = month > 2 ? month - 3 : month + 9;
-    final int dayOfYear = (153 * monthOffset + 2) / 5 + day - 1;
-    final int dayOfEra = yearOfEra * 365 + yearOfEra / 4 - yearOfEra / 100 + dayOfYear;
-    return (long) era * 146097 + dayOfEra - 719468;
-  }
-
-
-  private static final class ByteCursor {
-    private static final byte QUOTE = '"';
-    private static final byte COLON = ':';
-    private static final byte COMMA = ',';
-    private static final byte MINUS = '-';
-    private static final byte DOT = '.';
-    private static final byte OPEN_BRACKET = '[';
-    private static final byte CLOSE_BRACKET = ']';
-    private static final byte NULL_LOWER = 'n';
-    private static final byte NULL_UPPER = 'N';
-    private static final byte TRUE = 't';
-
-    private final byte[] source;
-    private int offset;
-    private boolean hasValue;
-
-    ByteCursor(final byte[] source) {
-      this.source = source;
-    }
-
-    int position() {
-      return offset;
-    }
-
-    void advance() {
-      offset++;
-    }
-
-    void markHasValue() {
-      hasValue = true;
-    }
-
-    boolean hasValue() {
-      return hasValue;
-    }
-
-    void skipPastNull() {
-      hasValue = false;
-      if (offset < source.length) {
-        if (source[offset] == NULL_LOWER || source[offset] == NULL_UPPER) {
-          offset += 4;
-        }
-      }
-    }
-
-
-    void skipToField(final byte[] fieldName) {
-      while (offset < source.length) {
-        if (source[offset] == QUOTE) {
-          offset++;
-          if (startsWith(offset, fieldName)) {
-            offset += fieldName.length;
-            skipTo(COLON);
-            offset++;
-            skipWhitespace();
-            return;
-          }
-          skipStringContents();
-        } else {
-          offset++;
-        }
-      }
-    }
-
-    boolean skipToOptionalField(final byte[] fieldName) {
-      int savedPosition = offset;
-      while (offset < source.length) {
-        if (source[offset] == QUOTE) {
-          offset++;
-          if (startsWith(offset, fieldName)) {
-            offset += fieldName.length;
-            offset++;
-            skipWhitespace();
-            return true;
-          }
-          skipStringContents();
-        } else if (source[offset] == NULL_LOWER || source[offset] == NULL_UPPER) {
-          offset = savedPosition;
-          return false;
-        } else {
-          offset++;
-        }
-      }
-      offset = savedPosition;
-      return false;
-    }
-
-    void skipFieldValue() {
-      skipTo(QUOTE);
-      offset++;
-      skipStringContents();
-      offset++;
-    }
-
-    void skipStringEnd() {
-      skipTo(QUOTE);
-      offset++;
-    }
-
-    void skipToArrayStart() {
-      skipTo(OPEN_BRACKET);
-      offset++;
-    }
-
-    void skipToArrayEnd() {
-      while (offset < source.length && source[offset] != CLOSE_BRACKET) {
-        offset++;
-      }
-    }
-
-    void skipStringContents() {
-      while (offset < source.length && source[offset] != QUOTE) {
-        offset++;
-      }
-    }
-
-
-    int parseInt() {
-      skipWhitespace();
-      boolean isNegative = source[offset] == MINUS;
-      if (isNegative) {
-        offset++;
-      }
-      int value = 0;
-      while (offset < source.length && isDigit(source[offset])) {
-        value = value * 10 + (source[offset] - '0');
-        offset++;
-      }
-      return isNegative ? -value : value;
-    }
-
-    float parseFloat() {
-      skipWhitespace();
-      boolean isNegative = source[offset] == MINUS;
-      if (isNegative) {
-        offset++;
-      }
-
-      long integerPart = 0;
-      while (offset < source.length && isDigit(source[offset])) {
-        integerPart = integerPart * 10 + (source[offset] - '0');
-        offset++;
-      }
-
-      float result = integerPart;
-
-      if (offset < source.length && source[offset] == DOT) {
-        offset++;
-        long fractionPart = 0;
-        int fractionDigits = 0;
-        while (offset < source.length && isDigit(source[offset])) {
-          fractionPart = fractionPart * 10 + (source[offset] - '0');
-          fractionDigits++;
-          offset++;
-        }
-        float divisor = 1f;
-        for (int power = 0; power < fractionDigits; power++) {
-          divisor *= 10f;
-        }
-        result += fractionPart / divisor;
-      }
-
-      return isNegative ? -result : result;
-    }
-
-    boolean parseBoolean() {
-      skipWhitespace();
-      if (source[offset] == TRUE) {
-        offset += 4;
-        return true;
-      }
-      offset += 5;
-      return false;
-    }
-
-    byte[] parseString() {
-      skipWhitespace();
-      if (source[offset] == QUOTE) {
-        offset++;
-      }
-      final int start = offset;
-      skipStringContents();
-      final byte[] result = java.util.Arrays.copyOfRange(source, start, offset);
-      if (offset < source.length && source[offset] == QUOTE) {
-        offset++;
-      }
-      return result;
-    }
-
-    int parseYear() {
-      skipWhitespace();
-      if (source[offset] == QUOTE) {
-        offset++;
-      }
-      return readDigits(4);
-    }
-
-    int parseTwoDigits() {
-      return readDigits(2);
-    }
-
-    int parseQuotedInt() {
-      skipWhitespace();
-      if (source[offset] == QUOTE) {
-        offset++;
-      }
-      int value = 0;
-      while (offset < source.length && isDigit(source[offset])) {
-        value = value * 10 + (source[offset] - '0');
-        offset++;
-      }
-      if (offset < source.length && source[offset] == QUOTE) {
-        offset++;
-      }
-      return value;
-    }
-
-
-    private boolean startsWith(final int start, final byte[] pattern) {
-      if (start + pattern.length > source.length) {
+  private static boolean byteRegionMatches(
+    final byte[] sourceArray,
+    final int sourceOffset,
+    final byte[] targetArray,
+    final int targetOffset,
+    final int matchLength
+  ) {
+    for (int i = 0; i < matchLength; i++) {
+      if (sourceArray[sourceOffset + i] != targetArray[targetOffset + i]) {
         return false;
       }
-      for (int index = 0; index < pattern.length; index++) {
-        if (source[start + index] != pattern[index]) {
-          return false;
-        }
-      }
-      return true;
     }
-
-    private int readDigits(final int count) {
-      int value = 0;
-      final int limit = Math.min(offset + count, source.length);
-      while (offset < limit && isDigit(source[offset])) {
-        value = value * 10 + (source[offset] - '0');
-        offset++;
-      }
-      return value;
-    }
-
-    private void skipTo(final byte target) {
-      while (offset < source.length && source[offset] != target) {
-        offset++;
-      }
-    }
-
-    private void skipWhitespace() {
-      while (offset < source.length && isWhitespace(source[offset])) {
-        offset++;
-      }
-    }
+    return true;
   }
 
-  private static boolean isWhitespace(final byte value) {
-    return value == ' ' || value == '\t' || value == '\n' || value == '\r';
-  }
-
-  private static boolean isDigit(final byte value) {
-    return value >= '0' && value <= '9';
+  private static byte[] encodeJsonKey(final String keyName) {
+    final byte[] encodedKey = new byte[keyName.length() + 2];
+    encodedKey[0] = CHAR_QUOTE;
+    System.arraycopy(
+      keyName.getBytes(StandardCharsets.US_ASCII),
+      0,
+      encodedKey,
+      1,
+      keyName.length()
+    );
+    encodedKey[encodedKey.length - 1] = CHAR_QUOTE;
+    return encodedKey;
   }
 }

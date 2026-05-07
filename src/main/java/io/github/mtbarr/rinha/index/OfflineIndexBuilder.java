@@ -1,463 +1,566 @@
 package io.github.mtbarr.rinha.index;
 
-import java.io.BufferedReader;
 import java.io.FileInputStream;
 import java.io.IOException;
-import java.io.InputStream;
-import java.io.InputStreamReader;
 import java.io.RandomAccessFile;
-import java.io.Reader;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.List;
-import java.util.Random;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.IntStream;
 import java.util.zip.GZIPInputStream;
 
 public final class OfflineIndexBuilder {
 
-  private record ParseResult(float[][] vectors, byte[] labels) {
-  }
-
-
-  private static final int CLUSTER_COUNT = Integer.parseInt(
-      System.getenv().getOrDefault("IVF_CLUSTER_COUNT", "1024")
-  );
-
-  private static final int DIMENSIONS = 14;
-  private static final int TRAINING_SAMPLE_SIZE = 131_072;
-  private static final int KMEANS_ITERATIONS = 10;
-  private static final float QUANTIZATION_SCALE = 10_000f;
-  private static final long RANDOM_SEED = 42;
+  private static final int NUM_CLUSTERS = 512;
+  private static final int NUM_DIMENSIONS = 14;
+  private static final int PQ_NUM_SUBSPACES = 7;
+  private static final int PQ_SUBSPACE_DIM = 2;
+  private static final int PQ_CODEBOOK_SIZE = 256;
+  private static final int TRAINING_SAMPLE_SIZE = 50_000;
+  private static final int IVF_MAX_ITERATIONS = 25;
+  private static final int PQ_MAX_ITERATIONS = 20;
+  private static final long RANDOM_SEED = 0xdeadbeefcafebabeL;
 
   private OfflineIndexBuilder() {
-    throw new AssertionError("Utility class should not be instantiated");
   }
 
-  static void main(final String[] arguments) throws Exception {
-    if (arguments.length < 2) {
+  static void main(final String[] args) throws Exception {
+    if (args.length < 2) {
       System.err.println("Usage: OfflineIndexBuilder <references.json.gz> <output.index.bin>");
       System.exit(1);
-      return;
     }
 
-    final String inputPath = arguments[0];
-    final String outputPath = arguments[1];
+    final String inputPath = args[0];
+    final String outputPath = args[1];
 
-    System.out.println("Reading references from: " + inputPath);
-    final ParseResult data = parseReferences(inputPath);
-    final int vectorCount = data.vectors.length;
-    System.out.println("Loaded " + vectorCount + " vectors");
+    System.out.println("Loading dataset...");
+    final float[][] vectors = loadVectors(inputPath);
+    final byte[] labels = loadLabels(inputPath);
+    final int numVectors = vectors.length;
+    System.out.println("  " + numVectors + " vectors, fraud=" + countFraud(labels));
 
-    System.out.println("Sampling " + TRAINING_SAMPLE_SIZE + " for K-Means training...");
-    final float[][] trainingSample = reservoirSample(data.vectors, TRAINING_SAMPLE_SIZE);
-
-    System.out.println("Running K-Means K=" + CLUSTER_COUNT + " ...");
-    final float[][] centroids = kMeans(trainingSample);
-
-    System.out.println("Assigning " + vectorCount + " vectors to nearest clusters (parallel)...");
-    final int[] clusterAssignments = assignToClustersParallel(data.vectors, centroids);
-
-    System.out.println("Building cluster ordering...");
-    final int[] sortedOrder = buildClusterOrdering(clusterAssignments, vectorCount);
-
-    final short[][] quantizedVectors = new short[vectorCount][DIMENSIONS];
-    final byte[] reorderedLabels = new byte[vectorCount];
-    final int[] reorderedOriginalIds = new int[vectorCount];
-    for (int index = 0; index < vectorCount; index++) {
-      final int sourceIndex = sortedOrder[index];
-      for (int dimension = 0; dimension < DIMENSIONS; dimension++) {
-        quantizedVectors[index][dimension] = quantize(data.vectors[sourceIndex][dimension]);
-      }
-      reorderedLabels[index] = data.labels[sourceIndex];
-      reorderedOriginalIds[index] = sourceIndex;
-    }
-
-    System.out.println("Computing bounding boxes...");
-    final short[][] bboxMinimum = new short[CLUSTER_COUNT][DIMENSIONS];
-    final short[][] bboxMaximum = new short[CLUSTER_COUNT][DIMENSIONS];
-    final int[] clusterOffsets = new int[CLUSTER_COUNT + 1];
-    computeBoundingBoxes(
-      quantizedVectors, clusterAssignments, sortedOrder,
-      bboxMinimum, bboxMaximum, clusterOffsets, vectorCount
+    System.out.println("K-Means++ init for IVF (K=" + NUM_CLUSTERS + ")...");
+    final float[][] ivfCentroids = initializeKMeansPlusPlus(
+      vectors,
+      NUM_CLUSTERS,
+      TRAINING_SAMPLE_SIZE,
+      RANDOM_SEED
     );
 
-    System.out.println("Writing index to: " + outputPath);
-    writeIndex(
-      outputPath, vectorCount, centroids,
-      bboxMinimum, bboxMaximum, clusterOffsets,
-      quantizedVectors, reorderedLabels, reorderedOriginalIds
+    System.out.println("IVF Lloyd iterations...");
+    final int[] clusterAssignments = new int[numVectors];
+    runLloydAlgorithm(
+      vectors,
+      ivfCentroids,
+      clusterAssignments,
+      IVF_MAX_ITERATIONS
     );
 
-    System.out.println("Done! Index written successfully.");
+    System.out.println("Training PQ codebooks...");
+    final float[][][] pqCodebooks = trainProductQuantization(
+      vectors,
+      PQ_MAX_ITERATIONS,
+      RANDOM_SEED
+    );
+
+    System.out.println("Encoding vectors...");
+    final byte[][] pqCodes = encodeAllVectors(vectors, pqCodebooks);
+
+    System.out.println("Building inverted lists...");
+    final int[][] idsByCluster = new int[NUM_CLUSTERS][];
+    final byte[][] codesByCluster = new byte[NUM_CLUSTERS][];
+    buildInvertedLists(
+      numVectors,
+      clusterAssignments,
+      pqCodes,
+      idsByCluster,
+      codesByCluster
+    );
+
+    System.out.println("Writing index...");
+    writeIndexToFile(
+      outputPath,
+      numVectors,
+      ivfCentroids,
+      pqCodebooks,
+      idsByCluster,
+      codesByCluster,
+      vectors,
+      labels
+    );
+
+    System.out.println("Done.");
   }
 
-  private static ParseResult parseReferences(final String filePath) throws IOException {
-    final List<float[]> vectorList = new ArrayList<>(3_000_000);
-    final List<Byte> labelList = new ArrayList<>(3_000_000);
-
-    try (final InputStream fileInput = new FileInputStream(filePath);
-      final InputStream gzipInput = new GZIPInputStream(fileInput);
-      final Reader reader = new InputStreamReader(gzipInput, StandardCharsets.UTF_8);
-      final BufferedReader lineReader = new BufferedReader(reader)) {
-
-      final StringBuilder text = new StringBuilder(300_000_000);
-      String line;
-      while ((line = lineReader.readLine()) != null) {
-        text.append(line);
-      }
-
-      final String content = text.toString();
-      int position = 0;
-
-      while (true) {
-        final int vectorTagStart = content.indexOf("\"vector\":[", position);
-        if (vectorTagStart < 0) {
-          break;
-        }
-
-        final float[] vector = new float[DIMENSIONS];
-        int cursor = vectorTagStart + 10;
-
-        for (int dimension = 0; dimension < DIMENSIONS; dimension++) {
-          while (cursor < content.length() &&
-                 (content.charAt(cursor) == ' ' || content.charAt(cursor) == '\n')) {
-            cursor++;
-          }
-          final int valueEnd = dimension < DIMENSIONS - 1
-                               ? content.indexOf(',', cursor)
-                               : content.indexOf(']', cursor);
-          vector[dimension] = Float.parseFloat(content.substring(cursor, valueEnd).trim());
-          cursor = valueEnd + 1;
-        }
-
-        final int labelTag = content.indexOf("\"label\":\"", cursor);
-        if (labelTag < 0) {
-          break;
-        }
-
-        final int labelStart = labelTag + 9;
-        final byte label = content.charAt(labelStart) == 'f' ? (byte) 1 : (byte) 0;
-
-        vectorList.add(vector);
-        labelList.add(label);
-
-        final int quoteAfterLabel = content.indexOf('"', labelStart);
-        position = quoteAfterLabel >= 0 ? quoteAfterLabel + 1 : cursor;
-      }
+  private static float[][] loadVectors(final String filePath) throws IOException {
+    final byte[] rawData;
+    try (final var gzipInputStream = new GZIPInputStream(new FileInputStream(filePath))) {
+      rawData = gzipInputStream.readAllBytes();
     }
 
-    final int total = vectorList.size();
-    final float[][] vectors = vectorList.toArray(new float[total][]);
-    final byte[] labels = new byte[total];
-    for (int index = 0; index < total; index++) {
-      labels[index] = labelList.get(index);
-    }
-    return new ParseResult(vectors, labels);
-  }
+    final int estimatedCapacity = 3_200_000;
+    final float[] flatVectors = new float[estimatedCapacity * NUM_DIMENSIONS];
+    int vectorCount = 0;
 
-  private static float[][] reservoirSample(final float[][] allVectors, final int sampleSize) {
-    final int total = allVectors.length;
-    if (total <= sampleSize) {
-      return allVectors;
-    }
+    int searchPosition = 0;
+    final byte[] vectorTag = "\"vector\":[".getBytes(StandardCharsets.US_ASCII);
 
-    final Random random = new Random(RANDOM_SEED);
-    final float[][] sample = new float[sampleSize][DIMENSIONS];
-
-    for (int index = 0; index < sampleSize; index++) {
-      System.arraycopy(allVectors[index], 0, sample[index], 0, DIMENSIONS);
-    }
-
-    for (int index = sampleSize; index < total; index++) {
-      final int swapTarget = random.nextInt(index + 1);
-      if (swapTarget < sampleSize) {
-        System.arraycopy(allVectors[index], 0, sample[swapTarget], 0, DIMENSIONS);
-      }
-    }
-
-    return sample;
-  }
-
-  private static float[][] kMeans(final float[][] trainingData) {
-    final long seed = RANDOM_SEED;
-    final int dataSize = trainingData.length;
-    final int sampleSize = Math.min(dataSize, 50_000);
-
-    final int[] sample = new int[sampleSize];
-    final long[] lcg = new long[]{seed};
-    for (int i = 0; i < sampleSize; i++) {
-      lcg[0] = lcg[0] * 6364136223846793005L + 1442695040888963407L;
-      sample[i] = (int) ((lcg[0] >>> 33) % dataSize);
-    }
-
-    final float[][] centroids = new float[CLUSTER_COUNT][DIMENSIONS];
-    final double[] minDists = new double[sampleSize];
-    Arrays.fill(minDists, Double.POSITIVE_INFINITY);
-
-    centroids[0] = trainingData[sample[0]].clone();
-
-    for (int k = 1; k < CLUSTER_COUNT; k++) {
-      final float[] lastCentroid = centroids[k - 1];
-      double total = 0;
-      for (int i = 0; i < sampleSize; i++) {
-        final float[] vec = trainingData[sample[i]];
-        final double d = squaredDistance(vec, lastCentroid);
-        if (d < minDists[i]) {
-          minDists[i] = d;
-        }
-        total += minDists[i];
-      }
-
-      lcg[0] = lcg[0] * 6364136223846793005L + 1442695040888963407L;
-      final double r = ((lcg[0] >>> 11) / (double) (1L << 53)) * total;
-      double cum = 0;
-      int chosen = sampleSize - 1;
-      for (int i = 0; i < sampleSize; i++) {
-        cum += minDists[i];
-        if (cum >= r) {
-          chosen = i;
-          break;
-        }
-      }
-      centroids[k] = trainingData[sample[chosen]].clone();
-    }
-
-    final int[] assignments = new int[dataSize];
-
-    for (int iteration = 0; iteration < KMEANS_ITERATIONS; iteration++) {
-      final AtomicInteger changes = new AtomicInteger(0);
-
-      IntStream.range(0, dataSize).parallel().forEach(dataIndex -> {
-        final float[] vector = trainingData[dataIndex];
-        int bestCluster = 0;
-        float bestDistance = Float.MAX_VALUE;
-
-        for (int cluster = 0; cluster < CLUSTER_COUNT; cluster++) {
-          final float distance = squaredDistance(vector, centroids[cluster]);
-          if (distance < bestDistance) {
-            bestDistance = distance;
-            bestCluster = cluster;
-          }
-        }
-
-        if (assignments[dataIndex] != bestCluster) {
-          assignments[dataIndex] = bestCluster;
-          changes.incrementAndGet();
-        }
-      });
-
-      if (iteration > 0 && changes.get() == 0) {
-        System.out.println("  K-Means converged at iteration " + iteration);
+    while (searchPosition < rawData.length) {
+      final int vectorTagIndex = findByteArrayIndex(rawData, vectorTag, searchPosition);
+      if (vectorTagIndex < 0) {
         break;
       }
 
-      final double[][] sums = new double[CLUSTER_COUNT][DIMENSIONS];
-      final int[] clusterSizes = new int[CLUSTER_COUNT];
-
-      for (int dataIndex = 0; dataIndex < dataSize; dataIndex++) {
-        final float[] vector = trainingData[dataIndex];
-        final int cluster = assignments[dataIndex];
-        for (int d = 0; d < DIMENSIONS; d++) {
-          sums[cluster][d] += vector[d];
+      int cursor = vectorTagIndex + vectorTag.length;
+      int dimension = 0;
+      final int baseOffset = vectorCount * NUM_DIMENSIONS;
+      while (dimension < NUM_DIMENSIONS) {
+        while (cursor < rawData.length
+               && (rawData[cursor] == ' ' || rawData[cursor] == '\n' || rawData[cursor] == '\r')) {
+          cursor++;
         }
-        clusterSizes[cluster]++;
+        final int valueEnd = findNextDelimiter(rawData, cursor);
+        flatVectors[baseOffset + dimension] = parseFloatFromBytes(rawData, cursor, valueEnd);
+        cursor = valueEnd + 1;
+        dimension++;
       }
 
-      for (int cluster = 0; cluster < CLUSTER_COUNT; cluster++) {
-        if (clusterSizes[cluster] > 0) {
-          for (int d = 0; d < DIMENSIONS; d++) {
-            centroids[cluster][d] = (float) (sums[cluster][d] / clusterSizes[cluster]);
+      vectorCount++;
+      searchPosition = cursor;
+    }
+
+    final float[][] result = new float[vectorCount][NUM_DIMENSIONS];
+    for (int i = 0; i < vectorCount; i++) {
+      System.arraycopy(flatVectors, i * NUM_DIMENSIONS, result[i], 0, NUM_DIMENSIONS);
+    }
+    return result;
+  }
+
+  private static int findByteArrayIndex(
+    final byte[] data,
+    final byte[] pattern,
+    final int fromIndex
+  ) {
+    final int patternLength = pattern.length;
+    final int searchLimit = data.length - patternLength;
+    for (int i = fromIndex; i <= searchLimit; i++) {
+      boolean match = true;
+      for (int j = 0; j < patternLength; j++) {
+        if (data[i + j] != pattern[j]) {
+          match = false;
+          break;
+        }
+      }
+      if (match) {
+        return i;
+      }
+    }
+    return -1;
+  }
+
+  private static int findNextDelimiter(final byte[] raw, final int fromIndex) {
+    int position = fromIndex;
+    while (position < raw.length
+           && raw[position] != ','
+           && raw[position] != ']') {
+      position++;
+    }
+    return position;
+  }
+
+  private static float parseFloatFromBytes(
+    final byte[] raw,
+    final int startIndex,
+    final int endIndex
+  ) {
+    float result = 0;
+    boolean isNegative = false;
+    int position = startIndex;
+    if (position < endIndex && raw[position] == '-') {
+      isNegative = true;
+      position++;
+    }
+    while (position < endIndex && raw[position] >= '0' && raw[position] <= '9') {
+      result = result * 10 + (raw[position] - '0');
+      position++;
+    }
+    if (position < endIndex && raw[position] == '.') {
+      position++;
+      float fractionalPart = 0;
+      float divisor = 1;
+      while (position < endIndex && raw[position] >= '0' && raw[position] <= '9') {
+        fractionalPart = fractionalPart * 10 + (raw[position] - '0');
+        divisor *= 10;
+        position++;
+      }
+      result += fractionalPart / divisor;
+    }
+    return isNegative ? -result : result;
+  }
+
+  private static byte[] loadLabels(final String filePath) throws IOException {
+    final byte[] rawData;
+    try (final var gzipInputStream = new GZIPInputStream(new FileInputStream(filePath))) {
+      rawData = gzipInputStream.readAllBytes();
+    }
+
+    final int estimatedCapacity = 3_200_000;
+    final byte[] labels = new byte[estimatedCapacity];
+    int labelCount = 0;
+
+    int searchPosition = 0;
+    final byte[] labelTag = "\"label\":\"".getBytes(StandardCharsets.US_ASCII);
+
+    while (searchPosition < rawData.length) {
+      final int labelTagIndex = findByteArrayIndex(rawData, labelTag, searchPosition);
+      if (labelTagIndex < 0) {
+        break;
+      }
+      final int labelValueIndex = labelTagIndex + labelTag.length;
+      labels[labelCount] = rawData[labelValueIndex] == 'f' ? (byte) 1 : (byte) 0;
+      labelCount++;
+      searchPosition = labelTagIndex + labelTag.length + 6;
+    }
+
+    return Arrays.copyOf(labels, labelCount);
+  }
+
+  private static int countFraud(final byte[] labels) {
+    int fraudCount = 0;
+    for (final byte label : labels) {
+      if (label == 1) {
+        fraudCount++;
+      }
+    }
+    return fraudCount;
+  }
+
+  private static float[][] initializeKMeansPlusPlus(
+    final float[][] vectors,
+    final int numClusters,
+    final int sampleSize,
+    final long seed
+  ) {
+    final int numVectors = vectors.length;
+    final int effectiveSampleSize = Math.min(numVectors, sampleSize);
+    final int[] sampleIndices = new int[effectiveSampleSize];
+    final long[] state = {seed};
+    for (int i = 0; i < effectiveSampleSize; i++) {
+      state[0] = state[0] * 6364136223846793005L + 1442695040888963407L;
+      sampleIndices[i] = (int) ((state[0] >>> 33) % numVectors);
+    }
+
+    final float[][] centroids = new float[numClusters][NUM_DIMENSIONS];
+    final double[] minDistances = new double[effectiveSampleSize];
+    Arrays.fill(minDistances, Double.POSITIVE_INFINITY);
+
+    centroids[0] = vectors[sampleIndices[0]].clone();
+
+    for (int clusterIndex = 1; clusterIndex < numClusters; clusterIndex++) {
+      final float[] lastCentroid = centroids[clusterIndex - 1];
+      double totalDistance = 0;
+      for (int i = 0; i < effectiveSampleSize; i++) {
+        final double distance = computeSquaredDistance(vectors[sampleIndices[i]], lastCentroid);
+        if (distance < minDistances[i]) {
+          minDistances[i] = distance;
+        }
+        totalDistance += minDistances[i];
+      }
+      state[0] = state[0] * 6364136223846793005L + 1442695040888963407L;
+      final double randomValue = ((state[0] >>> 11) / (double) (1L << 53)) * totalDistance;
+      double cumulativeDistance = 0;
+      int chosenIndex = effectiveSampleSize - 1;
+      for (int i = 0; i < effectiveSampleSize; i++) {
+        cumulativeDistance += minDistances[i];
+        if (cumulativeDistance >= randomValue) {
+          chosenIndex = i;
+          break;
+        }
+      }
+      centroids[clusterIndex] = vectors[sampleIndices[chosenIndex]].clone();
+    }
+    return centroids;
+  }
+
+  private static void runLloydAlgorithm(
+    final float[][] vectors,
+    final float[][] centroids,
+    final int[] assignments,
+    final int maxIterations
+  ) {
+    final int numVectors = vectors.length;
+    final int numClusters = centroids.length;
+    for (int iteration = 0; iteration < maxIterations; iteration++) {
+      final AtomicInteger changeCount = new AtomicInteger(0);
+      IntStream.range(0, numVectors).parallel().forEach(i -> {
+        int bestCluster = 0;
+        float bestDistance = Float.MAX_VALUE;
+        for (int c = 0; c < numClusters; c++) {
+          final float distance = computeSquaredDistance(vectors[i], centroids[c]);
+          if (distance < bestDistance) {
+            bestDistance = distance;
+            bestCluster = c;
+          }
+        }
+        if (assignments[i] != bestCluster) {
+          assignments[i] = bestCluster;
+          changeCount.incrementAndGet();
+        }
+      });
+      if (iteration > 0 && changeCount.get() == 0) {
+        System.out.println("  converged at " + iteration);
+        break;
+      }
+      final double[][] centroidSums = new double[numClusters][NUM_DIMENSIONS];
+      final int[] clusterCounts = new int[numClusters];
+      for (int i = 0; i < numVectors; i++) {
+        final int cluster = assignments[i];
+        clusterCounts[cluster]++;
+        for (int d = 0; d < NUM_DIMENSIONS; d++) {
+          centroidSums[cluster][d] += vectors[i][d];
+        }
+      }
+      for (int c = 0; c < numClusters; c++) {
+        if (clusterCounts[c] > 0) {
+          for (int d = 0; d < NUM_DIMENSIONS; d++) {
+            centroids[c][d] = (float) (centroidSums[c][d] / clusterCounts[c]);
+          }
+        }
+      }
+      System.out.println("  iter " + (iteration + 1) + ": " + changeCount.get() + " changed");
+    }
+  }
+
+  private static float[][][] trainProductQuantization(
+    final float[][] vectors,
+    final int maxIterations,
+    final long seed
+  ) {
+    final float[][][] codebooks = new float[PQ_NUM_SUBSPACES][PQ_CODEBOOK_SIZE][PQ_SUBSPACE_DIM];
+    final float[][] subVectors = new float[vectors.length][PQ_SUBSPACE_DIM];
+
+    for (int subspaceIndex = 0; subspaceIndex < PQ_NUM_SUBSPACES; subspaceIndex++) {
+      final int offset = subspaceIndex * PQ_SUBSPACE_DIM;
+      for (int i = 0; i < vectors.length; i++) {
+        subVectors[i][0] = vectors[i][offset];
+        subVectors[i][1] = vectors[i][offset + 1];
+      }
+      codebooks[subspaceIndex] = runKMeansOnSubspace(
+        subVectors,
+        PQ_CODEBOOK_SIZE,
+        seed + subspaceIndex,
+        maxIterations
+      );
+    }
+    return codebooks;
+  }
+
+  private static float[][] runKMeansOnSubspace(
+    final float[][] data,
+    final int numClusters,
+    final long seed,
+    final int maxIterations
+  ) {
+    final int numPoints = data.length;
+    final long[] state = {seed};
+    final float[][] centroids = new float[numClusters][PQ_SUBSPACE_DIM];
+    final boolean[] taken = new boolean[numPoints];
+    for (int i = 0; i < numClusters; i++) {
+      int index;
+      do {
+        state[0] = state[0] * 6364136223846793005L + 1442695040888963407L;
+        index = (int) ((state[0] >>> 33) % numPoints);
+      } while (taken[index]);
+      taken[index] = true;
+      centroids[i][0] = data[index][0];
+      centroids[i][1] = data[index][1];
+    }
+
+    final int[] assignments = new int[numPoints];
+    for (int iteration = 0; iteration < maxIterations; iteration++) {
+      int changeCount = 0;
+      for (int i = 0; i < numPoints; i++) {
+        float bestDistance = Float.MAX_VALUE;
+        int bestCluster = 0;
+        for (int c = 0; c < numClusters; c++) {
+          final float delta0 = data[i][0] - centroids[c][0];
+          final float delta1 = data[i][1] - centroids[c][1];
+          final float distance = delta0 * delta0 + delta1 * delta1;
+          if (distance < bestDistance) {
+            bestDistance = distance;
+            bestCluster = c;
+          }
+        }
+        if (assignments[i] != bestCluster) {
+          assignments[i] = bestCluster;
+          changeCount++;
+        }
+      }
+      if (iteration > 0 && changeCount == 0) {
+        break;
+      }
+      final double[][] clusterSums = new double[numClusters][PQ_SUBSPACE_DIM];
+      final int[] clusterCounts = new int[numClusters];
+      for (int i = 0; i < numPoints; i++) {
+        final int cluster = assignments[i];
+        clusterCounts[cluster]++;
+        clusterSums[cluster][0] += data[i][0];
+        clusterSums[cluster][1] += data[i][1];
+      }
+      for (int c = 0; c < numClusters; c++) {
+        if (clusterCounts[c] > 0) {
+          centroids[c][0] = (float) (clusterSums[c][0] / clusterCounts[c]);
+          centroids[c][1] = (float) (clusterSums[c][1] / clusterCounts[c]);
+        }
+      }
+    }
+    return centroids;
+  }
+
+  private static byte[][] encodeAllVectors(
+    final float[][] vectors,
+    final float[][][] codebooks
+  ) {
+    final int numVectors = vectors.length;
+    final byte[][] codes = new byte[numVectors][PQ_NUM_SUBSPACES];
+    for (int i = 0; i < numVectors; i++) {
+      for (int subspaceIndex = 0; subspaceIndex < PQ_NUM_SUBSPACES; subspaceIndex++) {
+        final int offset = subspaceIndex * PQ_SUBSPACE_DIM;
+        final float query0 = vectors[i][offset];
+        final float query1 = vectors[i][offset + 1];
+        float bestDistance = Float.MAX_VALUE;
+        int bestCentroid = 0;
+        for (int c = 0; c < PQ_CODEBOOK_SIZE; c++) {
+          final float delta0 = query0 - codebooks[subspaceIndex][c][0];
+          final float delta1 = query1 - codebooks[subspaceIndex][c][1];
+          final float distance = delta0 * delta0 + delta1 * delta1;
+          if (distance < bestDistance) {
+            bestDistance = distance;
+            bestCentroid = c;
+          }
+        }
+        codes[i][subspaceIndex] = (byte) bestCentroid;
+      }
+    }
+    return codes;
+  }
+
+  private static void buildInvertedLists(
+    final int numVectors,
+    final int[] assignments,
+    final byte[][] codes,
+    final int[][] idsByCluster,
+    final byte[][] codesByCluster
+  ) {
+    final int[] clusterCounts = new int[NUM_CLUSTERS];
+    for (int i = 0; i < numVectors; i++) {
+      clusterCounts[assignments[i]]++;
+    }
+    for (int c = 0; c < NUM_CLUSTERS; c++) {
+      idsByCluster[c] = new int[clusterCounts[c]];
+      codesByCluster[c] = new byte[clusterCounts[c] * PQ_NUM_SUBSPACES];
+    }
+    final int[] positionTracker = new int[NUM_CLUSTERS];
+    for (int i = 0; i < numVectors; i++) {
+      final int cluster = assignments[i];
+      final int position = positionTracker[cluster]++;
+      idsByCluster[cluster][position] = i;
+      System.arraycopy(
+        codes[i],
+        0,
+        codesByCluster[cluster],
+        position * PQ_NUM_SUBSPACES,
+        PQ_NUM_SUBSPACES
+      );
+    }
+  }
+
+  private static void writeIndexToFile(
+    final String filePath,
+    final int numVectors,
+    final float[][] ivfCentroids,
+    final float[][][] pqCodebooks,
+    final int[][] idsByCluster,
+    final byte[][] codesByCluster,
+    final float[][] vectors,
+    final byte[] labels
+  ) throws IOException {
+    final long vectorsOffset = 36L
+                               + NUM_CLUSTERS * NUM_DIMENSIONS * 4L
+                               + PQ_NUM_SUBSPACES * PQ_CODEBOOK_SIZE * PQ_SUBSPACE_DIM * 4L
+                               + 4L;
+
+    final long vectorsByteSize = (long) numVectors * NUM_DIMENSIONS * 4L;
+    final long labelsByteSize = numVectors;
+    long invertedListsByteSize = 0;
+    for (int c = 0; c < NUM_CLUSTERS; c++) {
+      invertedListsByteSize += 4L
+                               + (long) idsByCluster[c].length * 4L
+                               + (long) idsByCluster[c].length * PQ_NUM_SUBSPACES;
+    }
+
+    final long totalFileSize = vectorsOffset
+                               + vectorsByteSize
+                               + labelsByteSize
+                               + invertedListsByteSize;
+
+    try (final var randomAccessFile = new RandomAccessFile(filePath, "rw");
+      final var fileChannel = randomAccessFile.getChannel()) {
+      final ByteBuffer buffer = fileChannel.map(
+        FileChannel.MapMode.READ_WRITE,
+        0,
+        totalFileSize
+      );
+      buffer.order(ByteOrder.LITTLE_ENDIAN);
+
+      buffer.putInt(0x52494E44);
+      buffer.putInt(1);
+      buffer.putInt(NUM_CLUSTERS);
+      buffer.putInt(numVectors);
+      buffer.putLong(vectorsOffset);
+
+      for (int c = 0; c < NUM_CLUSTERS; c++) {
+        for (int d = 0; d < NUM_DIMENSIONS; d++) {
+          buffer.putFloat(ivfCentroids[c][d]);
+        }
+      }
+
+      for (int m = 0; m < PQ_NUM_SUBSPACES; m++) {
+        for (int c = 0; c < PQ_CODEBOOK_SIZE; c++) {
+          for (int d = 0; d < PQ_SUBSPACE_DIM; d++) {
+            buffer.putFloat(pqCodebooks[m][c][d]);
           }
         }
       }
 
-      System.out.println("  Iteration " + (iteration + 1) + ": " + changes.get() + " changed");
-    }
-
-    return centroids;
-  }
-
-  private static int[] assignToClustersParallel(final float[][] vectors, final float[][] centroids) {
-    final int[] assignments = new int[vectors.length];
-    IntStream.range(0, vectors.length).parallel().forEach(vectorIndex -> {
-      final float[] vector = vectors[vectorIndex];
-      int bestCluster = 0;
-      float bestDistance = Float.MAX_VALUE;
-      for (int cluster = 0; cluster < CLUSTER_COUNT; cluster++) {
-        final float distance = squaredDistance(vector, centroids[cluster]);
-        if (distance < bestDistance) {
-          bestDistance = distance;
-          bestCluster = cluster;
-        }
-      }
-      assignments[vectorIndex] = bestCluster;
-    });
-    return assignments;
-  }
-
-  private static float squaredDistance(final float[] vectorA, final float[] vectorB) {
-    float sum = 0f;
-    for (int d = 0; d < DIMENSIONS; d++) {
-      final float diff = vectorA[d] - vectorB[d];
-      sum += diff * diff;
-    }
-    return sum;
-  }
-
-
-  private static int[] buildClusterOrdering(final int[] assignments, final int vectorCount) {
-    final int[] prefix = new int[CLUSTER_COUNT + 1];
-    for (int index = 0; index < vectorCount; index++) {
-      prefix[assignments[index] + 1]++;
-    }
-    for (int cluster = 0; cluster < CLUSTER_COUNT; cluster++) {
-      prefix[cluster + 1] += prefix[cluster];
-    }
-
-    final int[] positions = Arrays.copyOf(prefix, CLUSTER_COUNT + 1);
-    final int[] sortedIndices = new int[vectorCount];
-    for (int index = 0; index < vectorCount; index++) {
-      final int cluster = assignments[index];
-      sortedIndices[positions[cluster]++] = index;
-    }
-    return sortedIndices;
-  }
-
-
-  private static void computeBoundingBoxes(
-    final short[][] quantizedVectors,
-    final int[] clusterAssignments,
-    final int[] sortedOrder,
-    final short[][] bboxMinimum,
-    final short[][] bboxMaximum,
-    final int[] clusterOffsets,
-    final int vectorCount) {
-
-    for (int cluster = 0; cluster < CLUSTER_COUNT; cluster++) {
-      Arrays.fill(bboxMinimum[cluster], Short.MAX_VALUE);
-      Arrays.fill(bboxMaximum[cluster], Short.MIN_VALUE);
-    }
-
-    int previousCluster = -1;
-    for (int position = 0; position < vectorCount; position++) {
-      final int sourceIndex = sortedOrder[position];
-      final int vectorCluster = clusterAssignments[sourceIndex];
-
-      if (vectorCluster != previousCluster) {
-        if (previousCluster >= 0) {
-          clusterOffsets[previousCluster + 1] = position;
-        } else {
-          clusterOffsets[0] = 0;
-        }
-        previousCluster = vectorCluster;
-        clusterOffsets[previousCluster] = position;
-      }
-
-      final short[] vector = quantizedVectors[position];
-      for (int d = 0; d < DIMENSIONS; d++) {
-        if (vector[d] < bboxMinimum[previousCluster][d]) {
-          bboxMinimum[previousCluster][d] = vector[d];
-        }
-        if (vector[d] > bboxMaximum[previousCluster][d]) {
-          bboxMaximum[previousCluster][d] = vector[d];
-        }
-      }
-    }
-
-    if (previousCluster >= 0) {
-      clusterOffsets[previousCluster + 1] = vectorCount;
-    }
-  }
-
-
-  private static short quantize(final float value) {
-    return (short) Math.clamp(
-      Math.round(value * QUANTIZATION_SCALE),
-      Short.MIN_VALUE,
-      Short.MAX_VALUE
-    );
-  }
-
-
-  private static void writeIndex(
-    final String outputPath,
-    final int vectorCount,
-    final float[][] centroids,
-    final short[][] bboxMinimum,
-    final short[][] bboxMaximum,
-    final int[] clusterOffsets,
-    final short[][] quantizedVectors,
-    final byte[] labels,
-    final int[] originalIds
-  ) throws IOException {
-
-    final int centroidBytes = CLUSTER_COUNT * DIMENSIONS * 4;
-    final int bboxBytes = 2 * CLUSTER_COUNT * DIMENSIONS * 2;
-    final int offsetBytes = (CLUSTER_COUNT + 1) * 4;
-    final int vectorBytes = vectorCount * DIMENSIONS * 2;
-    final int labelBytes = vectorCount;
-    final int originalIdBytes = vectorCount * 4;
-    final long totalSize = 24L + centroidBytes + bboxBytes + offsetBytes
-                           + vectorBytes + labelBytes + originalIdBytes;
-
-    if (totalSize > Integer.MAX_VALUE) {
-      throw new IOException("Index too large: " + totalSize);
-    }
-
-    try (final RandomAccessFile outputFile = new RandomAccessFile(outputPath, "rw");
-      final FileChannel channel = outputFile.getChannel()) {
-
-      final ByteBuffer buffer = channel.map(
-        FileChannel.MapMode.READ_WRITE, 0, (int) totalSize);
-      buffer.order(ByteOrder.LITTLE_ENDIAN);
-
-      buffer.putInt(0x49564636);
-      buffer.putInt(vectorCount);
-      buffer.putInt(CLUSTER_COUNT);
-      buffer.putInt(DIMENSIONS);
-      buffer.putInt(DIMENSIONS);
-      buffer.putFloat(QUANTIZATION_SCALE);
-
-      for (int cluster = 0; cluster < CLUSTER_COUNT; cluster++) {
-        for (int d = 0; d < DIMENSIONS; d++) {
-          buffer.putFloat(centroids[cluster][d]);
-        }
-      }
-
-      for (int cluster = 0; cluster < CLUSTER_COUNT; cluster++) {
-        for (int d = 0; d < DIMENSIONS; d++) {
-          buffer.putShort(bboxMinimum[cluster][d]);
-        }
-      }
-
-      for (int cluster = 0; cluster < CLUSTER_COUNT; cluster++) {
-        for (int d = 0; d < DIMENSIONS; d++) {
-          buffer.putShort(bboxMaximum[cluster][d]);
-        }
-      }
-
-      for (int index = 0; index <= CLUSTER_COUNT; index++) {
-        buffer.putInt(clusterOffsets[index]);
-      }
-
-      for (int vector = 0; vector < vectorCount; vector++) {
-        for (int d = 0; d < DIMENSIONS; d++) {
-          buffer.putShort(quantizedVectors[vector][d]);
+      buffer.putInt(numVectors);
+      for (int i = 0; i < numVectors; i++) {
+        for (int d = 0; d < NUM_DIMENSIONS; d++) {
+          buffer.putFloat(vectors[i][d]);
         }
       }
 
       buffer.put(labels);
 
-      for (int vector = 0; vector < vectorCount; vector++) {
-        buffer.putInt(originalIds[vector]);
+      for (int c = 0; c < NUM_CLUSTERS; c++) {
+        buffer.putInt(idsByCluster[c].length);
+        for (final int id : idsByCluster[c]) {
+          buffer.putInt(id);
+        }
+        buffer.put(codesByCluster[c]);
       }
     }
   }
 
+  private static float computeSquaredDistance(final float[] a, final float[] b) {
+    float sum = 0;
+    for (int i = 0; i < NUM_DIMENSIONS; i++) {
+      final float delta = a[i] - b[i];
+      sum += delta * delta;
+    }
+    return sum;
+  }
 }

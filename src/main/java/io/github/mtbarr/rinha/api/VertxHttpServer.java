@@ -4,92 +4,99 @@ import io.github.mtbarr.rinha.index.InvertedFileIndex;
 import io.github.mtbarr.rinha.service.FraudRequestParser;
 import io.quarkus.runtime.StartupEvent;
 import io.vertx.core.Vertx;
-import io.vertx.core.http.HttpMethod;
 import io.vertx.core.http.HttpServerOptions;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 
 @ApplicationScoped
-public class VertxHttpServer {
+public final class VertxHttpServer {
 
-  private static final String PATH_FRAUD_SCORE = "/fraud-score";
+  private static final int NEIGHBOR_COUNT = 5;
+
+  private static final String[] FRAUD_SCORE_RESPONSES = {
+    "{\"approved\":true,\"fraud_score\":0.0}",
+    "{\"approved\":true,\"fraud_score\":0.2}",
+    "{\"approved\":true,\"fraud_score\":0.4}",
+    "{\"approved\":false,\"fraud_score\":0.6}",
+    "{\"approved\":false,\"fraud_score\":0.8}",
+    "{\"approved\":false,\"fraud_score\":1.0}"
+  };
+
+  private static final String HEALTH_CHECK_RESPONSE = "OK";
+  private static final String NOT_FOUND_RESPONSE = "Not found";
+
+  private static final String HTTP_METHOD_GET = "GET";
+  private static final String HTTP_METHOD_POST = "POST";
   private static final String PATH_READY = "/ready";
+  private static final String PATH_FRAUD_SCORE = "/fraud-score";
   private static final String CONTENT_TYPE_JSON = "application/json";
+  private static final String CONTENT_TYPE_TEXT = "text/plain";
 
-  /**
-   * As únicas 6 respostas possíveis, pré-montadas no startup. Indexado por fraudVotes (0..5) — elimina String
-   * concatenation e o problema de representação float (ex: 3 * 0.2 = 0.6000000000000001).
-   */
-  private static final String[] SCORE_RESPONSES = {
-    "{\"approved\":true,\"fraud_score\":0.0000}",
-    "{\"approved\":true,\"fraud_score\":0.2000}",
-    "{\"approved\":true,\"fraud_score\":0.4000}",
-    "{\"approved\":false,\"fraud_score\":0.6000}",
-    "{\"approved\":false,\"fraud_score\":0.8000}",
-    "{\"approved\":false,\"fraud_score\":1.0000}",
-    };
+  private final ThreadLocal<int[]> neighborIdBuffer = ThreadLocal.withInitial(
+    () -> new int[NEIGHBOR_COUNT]
+  );
+  private final ThreadLocal<float[]> neighborDistanceBuffer = ThreadLocal.withInitial(
+    () -> new float[NEIGHBOR_COUNT]
+  );
 
   @Inject
-  Vertx vertx;
+  Vertx vertxEngine;
 
   @Inject
-  InvertedFileIndex vectorIndex;
+  InvertedFileIndex fraudVectorIndex;
 
   @Inject
-  FraudRequestParser fraudRequestParser;
+  FraudRequestParser requestFeatureExtractor;
 
-  void onStart(@Observes final StartupEvent event) {
-    final HttpServerOptions options = new HttpServerOptions()
+  void onStart(final @Observes StartupEvent startupEvent) {
+    final HttpServerOptions serverOptions = new HttpServerOptions()
       .setPort(8080)
       .setHost("0.0.0.0")
       .setCompressionSupported(false)
       .setTcpFastOpen(true)
       .setTcpNoDelay(true)
-      .setAcceptBacklog(4_096);
+      .setAcceptBacklog(4096);
 
-    vertx.createHttpServer(options)
-      .requestHandler(req -> {
-        final String path = req.path();
-
-        // Hot path primeiro — /fraud-score é chamado ordens de grandeza mais do que /ready
-        if (PATH_FRAUD_SCORE.equals(path)) {
-          if (req.method() != HttpMethod.POST) {
-            req.response().setStatusCode(405).end();
-            return;
-          }
-          req.bodyHandler(body -> {
-            final String response;
-            if (!vectorIndex.isReady()) {
-              response = SCORE_RESPONSES[0];
-            } else {
-              response = computeResponse(body.getBytes());
-            }
-            req.response()
+    vertxEngine.createHttpServer(serverOptions)
+      .requestHandler(httpRequest -> {
+        final String requestMethod = httpRequest.method().name();
+        final String requestPath = httpRequest.path();
+        if (HTTP_METHOD_GET.equals(requestMethod) && PATH_READY.equals(requestPath)) {
+          httpRequest.response()
+            .putHeader("Content-Type", CONTENT_TYPE_TEXT)
+            .end(HEALTH_CHECK_RESPONSE);
+          return;
+        }
+        if (HTTP_METHOD_POST.equals(requestMethod) && PATH_FRAUD_SCORE.equals(requestPath)) {
+          httpRequest.bodyHandler(requestBody -> {
+            final String responsePayload = buildFraudScoreResponse(requestBody.getBytes());
+            httpRequest.response()
               .putHeader("Content-Type", CONTENT_TYPE_JSON)
-              .end(response);
+              .end(responsePayload);
           });
           return;
         }
-
-        if (PATH_READY.equals(path)) {
-          req.response()
-            .setStatusCode(vectorIndex.isReady() ? 200 : 503)
-            .end();
-          return;
-        }
-
-        req.response().setStatusCode(404).end();
+        httpRequest.response()
+          .setStatusCode(404)
+          .end(NOT_FOUND_RESPONSE);
       })
       .listen();
   }
 
-  private String computeResponse(final byte[] rawBytes) {
+  private String buildFraudScoreResponse(final byte[] requestPayload) {
     try {
-      final float[] featureVector = fraudRequestParser.extractVector(rawBytes);
-      return SCORE_RESPONSES[vectorIndex.search(featureVector)];
-    } catch (final Exception unexpectedError) {
-      return SCORE_RESPONSES[0];
+      final float[] featureVector = requestFeatureExtractor.extractFeatureVector(requestPayload);
+      final int[] neighborIds = neighborIdBuffer.get();
+      final float[] neighborDistances = neighborDistanceBuffer.get();
+      final int fraudVoteCount = fraudVectorIndex.searchNearestNeighbors(
+        featureVector,
+        neighborIds,
+        neighborDistances
+      );
+      return FRAUD_SCORE_RESPONSES[fraudVoteCount];
+    } catch (final Exception processingError) {
+      return FRAUD_SCORE_RESPONSES[0];
     }
   }
 }
