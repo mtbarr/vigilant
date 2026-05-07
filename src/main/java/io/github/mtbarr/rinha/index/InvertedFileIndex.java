@@ -2,10 +2,6 @@ package io.github.mtbarr.rinha.index;
 
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
-import jdk.incubator.vector.IntVector;
-import jdk.incubator.vector.ShortVector;
-import jdk.incubator.vector.VectorOperators;
-import jdk.incubator.vector.VectorSpecies;
 import java.io.File;
 import java.io.IOException;
 import java.io.RandomAccessFile;
@@ -23,9 +19,6 @@ public class InvertedFileIndex {
   private static final int FAST_PROBE_COUNT = 8;
   private static final int FULL_PROBE_COUNT = 24;
 
-  private static final VectorSpecies<Short> SHORT_SPECIES = ShortVector.SPECIES_PREFERRED;
-  private static final int VECTOR_LANE_COUNT = SHORT_SPECIES.length();
-
   private int clusterCount;
   private short[][] quantizedCentroids;
   private short[][] bboxMinimum;
@@ -35,9 +28,6 @@ public class InvertedFileIndex {
   private short[][] dimensionsByVector;
   private byte[] vectorLabels;
   private int[] vectorOriginalIds;
-
-  private final int[] squaredComponentBuffer = new int[Math.max(VECTOR_LANE_COUNT, DIMENSIONS)];
-  private final short[] gatherBuffer = new short[Math.max(VECTOR_LANE_COUNT, DIMENSIONS)];
 
   private volatile boolean isIndexReady = false;
 
@@ -56,7 +46,7 @@ public class InvertedFileIndex {
   private void loadIndex(final String indexPath) throws IOException {
     final File indexFile = new File(indexPath);
     try (final RandomAccessFile file = new RandomAccessFile(indexFile, "r");
-         final FileChannel channel = file.getChannel()) {
+      final FileChannel channel = file.getChannel()) {
 
       final ByteBuffer buffer = channel.map(
         FileChannel.MapMode.READ_ONLY, 0, indexFile.length());
@@ -186,16 +176,15 @@ public class InvertedFileIndex {
     return nearestNeighbors.countFraudVotes();
   }
 
-  private void scanCluster(final short[] queryQuantized, final int clusterIndex,
-                           final NearestNeighborsBuffer nearestNeighbors) {
+  private void scanCluster(
+    final short[] queryQuantized,
+    final int clusterIndex,
+    final NearestNeighborsBuffer nearestNeighbors
+  ) {
     final int endOffset = clusterEndOffset[clusterIndex];
     for (int vectorPosition = clusterStartOffset[clusterIndex]; vectorPosition < endOffset; vectorPosition++) {
+      final long squaredDistance = vectorSquaredDistance(queryQuantized, vectorPosition);
 
-      for (int dimension = 0; dimension < DIMENSIONS; dimension++) {
-        gatherBuffer[dimension] = dimensionsByVector[dimension][vectorPosition];
-      }
-
-      final long squaredDistance = vectorSquaredDistance(queryQuantized, gatherBuffer);
       nearestNeighbors.tryInsert(
         squaredDistance,
         vectorLabels[vectorPosition],
@@ -204,31 +193,45 @@ public class InvertedFileIndex {
     }
   }
 
+  private long vectorSquaredDistance(final short[] queryVector, final int vectorPosition) {
+    long totalSum = 0L;
+
+    int dimension = 0;
+    for (; dimension + 3 < DIMENSIONS; dimension += 4) {
+      final int diff0 = queryVector[dimension] - dimensionsByVector[dimension][vectorPosition];
+      final int diff1 = queryVector[dimension + 1] - dimensionsByVector[dimension + 1][vectorPosition];
+      final int diff2 = queryVector[dimension + 2] - dimensionsByVector[dimension + 2][vectorPosition];
+      final int diff3 = queryVector[dimension + 3] - dimensionsByVector[dimension + 3][vectorPosition];
+      totalSum += (long) diff0 * diff0;
+      totalSum += (long) diff1 * diff1;
+      totalSum += (long) diff2 * diff2;
+      totalSum += (long) diff3 * diff3;
+    }
+    for (; dimension < DIMENSIONS; dimension++) {
+      final int diff = queryVector[dimension] - dimensionsByVector[dimension][vectorPosition];
+      totalSum += (long) diff * diff;
+    }
+
+    return totalSum;
+  }
+
   private long vectorSquaredDistance(final short[] vectorA, final short[] vectorB) {
     long totalSum = 0L;
 
-    for (int offset = 0; offset < DIMENSIONS; offset += VECTOR_LANE_COUNT) {
-      final var mask = SHORT_SPECIES.indexInRange(offset, DIMENSIONS);
-      final var shortA = ShortVector.fromArray(SHORT_SPECIES, vectorA, offset, mask);
-      final var shortB = ShortVector.fromArray(SHORT_SPECIES, vectorB, offset, mask);
-
-      final var intA0 = (IntVector) shortA.convert(VectorOperators.S2I, 0);
-      final var intB0 = (IntVector) shortB.convert(VectorOperators.S2I, 0);
-      final var intA1 = (IntVector) shortA.convert(VectorOperators.S2I, 1);
-      final var intB1 = (IntVector) shortB.convert(VectorOperators.S2I, 1);
-
-      final var difference0 = intA0.sub(intB0);
-      final var difference1 = intA1.sub(intB1);
-      final var squared0 = difference0.mul(difference0);
-      final var squared1 = difference1.mul(difference1);
-
-      squared0.intoArray(squaredComponentBuffer, 0);
-      squared1.intoArray(squaredComponentBuffer, VECTOR_LANE_COUNT / 2);
-
-      final int validComponents = Math.min(VECTOR_LANE_COUNT, DIMENSIONS - offset);
-      for (int component = 0; component < validComponents; component++) {
-        totalSum += squaredComponentBuffer[component];
-      }
+    int dimension = 0;
+    for (; dimension + 3 < DIMENSIONS; dimension += 4) {
+      final int diff0 = vectorA[dimension] - vectorB[dimension];
+      final int diff1 = vectorA[dimension + 1] - vectorB[dimension + 1];
+      final int diff2 = vectorA[dimension + 2] - vectorB[dimension + 2];
+      final int diff3 = vectorA[dimension + 3] - vectorB[dimension + 3];
+      totalSum += (long) diff0 * diff0;
+      totalSum += (long) diff1 * diff1;
+      totalSum += (long) diff2 * diff2;
+      totalSum += (long) diff3 * diff3;
+    }
+    for (; dimension < DIMENSIONS; dimension++) {
+      final int diff = vectorA[dimension] - vectorB[dimension];
+      totalSum += (long) diff * diff;
     }
 
     return totalSum;

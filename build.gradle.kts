@@ -31,10 +31,6 @@ java {
 }
 
 tasks.withType<JavaCompile> {
-    options.compilerArgs.add("--add-modules=jdk.incubator.vector")
-}
-
-tasks.withType<JavaCompile> {
     options.encoding = "UTF-8"
     options.compilerArgs.add("-parameters")
 }
