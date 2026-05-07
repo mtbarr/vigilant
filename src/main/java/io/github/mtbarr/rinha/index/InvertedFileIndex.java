@@ -11,6 +11,9 @@ import java.lang.foreign.ValueLayout;
 import java.nio.ByteOrder;
 import java.nio.channels.FileChannel.MapMode;
 import java.util.Arrays;
+import jdk.incubator.vector.FloatVector;
+import jdk.incubator.vector.VectorOperators;
+import jdk.incubator.vector.VectorSpecies;
 
 @Singleton
 public class InvertedFileIndex {
@@ -20,9 +23,12 @@ public class InvertedFileIndex {
   private static final int PQ_M = 7;
   private static final int PQ_SUB_D = 2;
   private static final int PQ_CODEBOOK_SIZE = 256;
-  private static final int NUM_PROBE_CLUSTERS = 32;
-  private static final int NUM_PROBE_GRAY = 12;
+  private static final int NUM_PROBE_CLUSTERS = 24;
+  private static final int NUM_PROBE_GRAY = 8;
+  private static final int RERANK_CANDIDATES = 50;
   private static final int NUM_NEIGHBORS = 5;
+
+  private static final VectorSpecies<Float> FLOAT_SPECIES = FloatVector.SPECIES_PREFERRED;
 
   private static final ValueLayout.OfInt INT_LE = ValueLayout.JAVA_INT.withOrder(ByteOrder.LITTLE_ENDIAN);
   private static final ValueLayout.OfLong LONG_LE = ValueLayout.JAVA_LONG.withOrder(ByteOrder.LITTLE_ENDIAN);
@@ -33,6 +39,7 @@ public class InvertedFileIndex {
   private byte[] fraudLabels;
   private int[][] idsByCluster;
   private byte[][] codesByCluster;
+  private float[] originalVectorsFlat;
   private volatile boolean isIndexReady = false;
 
   private final ThreadLocal<float[]> centroidDistanceBuffer = ThreadLocal.withInitial(
@@ -43,6 +50,12 @@ public class InvertedFileIndex {
   );
   private final ThreadLocal<float[][]> adcLookupTable = ThreadLocal.withInitial(
     () -> new float[PQ_M][PQ_CODEBOOK_SIZE]
+  );
+  private final ThreadLocal<int[]> rerankIdBuffer = ThreadLocal.withInitial(
+    () -> new int[RERANK_CANDIDATES]
+  );
+  private final ThreadLocal<float[]> rerankDistBuffer = ThreadLocal.withInitial(
+    () -> new float[RERANK_CANDIDATES]
   );
 
   @PostConstruct
@@ -105,6 +118,13 @@ public class InvertedFileIndex {
       final MemorySegment labelsSegment = indexSegment.asSlice(labelsOffset, totalVectorCount);
       labelsSegment.asByteBuffer().get(fraudLabels);
 
+      // --- Load original vectors for reranking ---
+      final long vectorsOffset = indexSegment.get(LONG_LE, 16);
+      originalVectorsFlat = new float[totalVectorCount * NUM_DIMENSIONS];
+      final MemorySegment vectorsSegment = indexSegment.asSlice(
+        vectorsOffset, (long) totalVectorCount * NUM_DIMENSIONS * 4L);
+      vectorsSegment.asByteBuffer().order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer().get(originalVectorsFlat);
+
       // --- Copy inverted lists to heap: IDs (int[]) and PQ codes (byte[]) per cluster ---
       final long invertedListsOffset = labelsOffset + totalVectorCount;
       idsByCluster = new int[NUM_CLUSTERS][];
@@ -147,12 +167,8 @@ public class InvertedFileIndex {
     final int[] centroidOrder = centroidOrderBuffer.get();
 
     for (int ci = 0; ci < NUM_CLUSTERS; ci++) {
-      float dist = 0.0f;
       final int base = ci * NUM_DIMENSIONS;
-      for (int d = 0; d < NUM_DIMENSIONS; d++) {
-        final float delta = queryVector[d] - ivfCentroidsFlat[base + d];
-        dist = Math.fma(delta, delta, dist);
-      }
+      float dist = simdSquaredDistance(queryVector, ivfCentroidsFlat, base);
       centroidDistances[ci] = dist;
       centroidOrder[ci] = ci;
     }
@@ -161,8 +177,11 @@ public class InvertedFileIndex {
     final float[][] adcTable = adcLookupTable.get();
     buildAdcLookupTable(queryVector, adcTable);
 
-    Arrays.fill(neighborIds, -1);
-    Arrays.fill(neighborDistances, Float.MAX_VALUE);
+    // Stage 1: coarse search — collect top RERANK_CANDIDATES via PQ approximate distance
+    final int[] coarseIds = rerankIdBuffer.get();
+    final float[] coarseDists = rerankDistBuffer.get();
+    Arrays.fill(coarseIds, -1);
+    Arrays.fill(coarseDists, Float.MAX_VALUE);
 
     for (int probe = 0; probe < NUM_PROBE_CLUSTERS; probe++) {
       final int ci = centroidOrder[probe];
@@ -171,21 +190,22 @@ public class InvertedFileIndex {
 
       for (int i = 0; i < ids.length; i++) {
         final float approx = adcDistance(adcTable, codes, i * PQ_M);
-        if (approx < neighborDistances[NUM_NEIGHBORS - 1]) {
-          insertIntoSortedArray(neighborIds, neighborDistances, NUM_NEIGHBORS, ids[i], approx);
+        if (approx < coarseDists[RERANK_CANDIDATES - 1]) {
+          insertIntoSortedArray(coarseIds, coarseDists, RERANK_CANDIDATES, ids[i], approx);
         }
       }
+    }
 
-      if (probe == NUM_PROBE_GRAY - 1) {
-        int fc = 0;
-        for (int k = 0; k < NUM_NEIGHBORS; k++) {
-          if (neighborIds[k] >= 0 && fraudLabels[neighborIds[k]] == 1) {
-            fc++;
-          }
-        }
-        if (fc <= 1 || fc >= NUM_NEIGHBORS - 1) {
-          return fc;
-        }
+    // Stage 2: exact rerank over the candidate set using original vectors
+    Arrays.fill(neighborIds, -1);
+    Arrays.fill(neighborDistances, Float.MAX_VALUE);
+
+    for (int i = 0; i < RERANK_CANDIDATES; i++) {
+      final int id = coarseIds[i];
+      if (id < 0) continue;
+      final float exactDist = exactSquaredDistance(queryVector, id);
+      if (exactDist < neighborDistances[NUM_NEIGHBORS - 1]) {
+        insertIntoSortedArray(neighborIds, neighborDistances, NUM_NEIGHBORS, id, exactDist);
       }
     }
 
@@ -196,6 +216,27 @@ public class InvertedFileIndex {
       }
     }
     return fraudVoteCount;
+  }
+
+  private float exactSquaredDistance(final float[] query, final int vectorId) {
+    return simdSquaredDistance(query, originalVectorsFlat, vectorId * NUM_DIMENSIONS);
+  }
+
+  private static float simdSquaredDistance(final float[] a, final float[] b, final int bOffset) {
+    int i = 0;
+    float sum = 0.0f;
+    final int limit = FLOAT_SPECIES.loopBound(NUM_DIMENSIONS);
+    for (; i < limit; i += FLOAT_SPECIES.length()) {
+      FloatVector va = FloatVector.fromArray(FLOAT_SPECIES, a, i);
+      FloatVector vb = FloatVector.fromArray(FLOAT_SPECIES, b, bOffset + i);
+      FloatVector diff = va.sub(vb);
+      sum += diff.mul(diff).reduceLanes(VectorOperators.ADD);
+    }
+    for (; i < NUM_DIMENSIONS; i++) {
+      final float diff = a[i] - b[bOffset + i];
+      sum += diff * diff;
+    }
+    return sum;
   }
 
   private static float adcDistance(

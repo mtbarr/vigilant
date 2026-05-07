@@ -33,6 +33,12 @@ java {
 tasks.withType<JavaCompile> {
     options.encoding = "UTF-8"
     options.compilerArgs.add("-parameters")
+    options.compilerArgs.add("--add-modules")
+    options.compilerArgs.add("jdk.incubator.vector")
+}
+
+tasks.withType<Test> {
+    jvmArgs("--add-modules", "jdk.incubator.vector")
 }
 
 tasks.register("printClasspath") {
