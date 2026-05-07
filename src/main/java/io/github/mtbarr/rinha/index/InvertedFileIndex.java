@@ -154,18 +154,6 @@ public class InvertedFileIndex {
     }
   }
 
-  private void runWarmupQueries() {
-    final float[] warmupQuery = new float[NUM_DIMENSIONS];
-    final int[] warmupNeighbors = new int[NUM_NEIGHBORS];
-    final float[] warmupDistances = new float[NUM_NEIGHBORS];
-    for (int i = 0; i < 30; i++) {
-      for (int d = 0; d < NUM_DIMENSIONS; d++) {
-        warmupQuery[d] = (i * 7 + d) % 100 / 100f;
-      }
-      searchNearestNeighbors(warmupQuery, warmupNeighbors, warmupDistances);
-    }
-  }
-
   public int searchNearestNeighbors(
     final float[] queryVector,
     final int[] neighborIds,
