@@ -19,7 +19,7 @@ services:
     image: ${API_IMAGE:-vigilant:latest}
     build:
       context: .
-      dockerfile: Dockerfile.app
+      dockerfile: Dockerfile
     environment:
       INDEX_PATH: /app/data/index.bin
     volumes:
