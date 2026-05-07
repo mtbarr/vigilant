@@ -39,7 +39,8 @@ public class InvertedFileIndex {
   private byte[] fraudLabels;
   private int[][] idsByCluster;
   private byte[][] codesByCluster;
-  private float[] originalVectorsFlat;
+  private MemorySegment mmapSegment;
+  private long vectorsFileOffset;
   private volatile boolean isIndexReady = false;
 
   private final ThreadLocal<float[]> centroidDistanceBuffer = ThreadLocal.withInitial(
@@ -118,12 +119,9 @@ public class InvertedFileIndex {
       final MemorySegment labelsSegment = indexSegment.asSlice(labelsOffset, totalVectorCount);
       labelsSegment.asByteBuffer().get(fraudLabels);
 
-      // --- Load original vectors for reranking ---
-      final long vectorsOffset = indexSegment.get(LONG_LE, 16);
-      originalVectorsFlat = new float[totalVectorCount * NUM_DIMENSIONS];
-      final MemorySegment vectorsSegment = indexSegment.asSlice(
-        vectorsOffset, (long) totalVectorCount * NUM_DIMENSIONS * 4L);
-      vectorsSegment.asByteBuffer().order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer().get(originalVectorsFlat);
+      // --- Keep mmap reference for reranking (read original vectors on-demand) ---
+      vectorsFileOffset = indexSegment.get(LONG_LE, 16);
+      mmapSegment = indexSegment;
 
       // --- Copy inverted lists to heap: IDs (int[]) and PQ codes (byte[]) per cluster ---
       final long invertedListsOffset = labelsOffset + totalVectorCount;
@@ -219,7 +217,13 @@ public class InvertedFileIndex {
   }
 
   private float exactSquaredDistance(final float[] query, final int vectorId) {
-    return simdSquaredDistance(query, originalVectorsFlat, vectorId * NUM_DIMENSIONS);
+    final long base = vectorsFileOffset + (long) vectorId * NUM_DIMENSIONS * 4L;
+    float sum = 0.0f;
+    for (int d = 0; d < NUM_DIMENSIONS; d++) {
+      final float diff = query[d] - mmapSegment.get(FLOAT_LE, base + (long) d * 4L);
+      sum = Math.fma(diff, diff, sum);
+    }
+    return sum;
   }
 
   private static float simdSquaredDistance(final float[] a, final float[] b, final int bOffset) {
