@@ -203,7 +203,6 @@ public class InvertedFileIndex {
         }
       }
 
-      // Early exit after fast-path probes if decision is unambiguous
       if (probeIndex == NUM_PROBE_GRAY - 1) {
         int fastFraudCount = 0;
         for (int i = 0; i < NUM_NEIGHBORS; i++) {
@@ -214,11 +213,9 @@ public class InvertedFileIndex {
         if (fastFraudCount <= 1 || fastFraudCount >= NUM_NEIGHBORS - 1) {
           return fastFraudCount;
         }
-        // Gray zone (2 or 3) — continue full scan
       }
     }
 
-    // Light re-rank: only the top-5 candidates using exact distance
     final float[] vec = new float[NUM_DIMENSIONS];
     for (int i = 0; i < NUM_NEIGHBORS; i++) {
       final int id = neighborIds[i];
@@ -232,7 +229,7 @@ public class InvertedFileIndex {
       }
       neighborDistances[i] = computeSquaredDistance(queryVector, vec);
     }
-    // Re-sort the top-5 by exact distance (simple insertion sort for 5 elements)
+
     for (int i = 1; i < NUM_NEIGHBORS; i++) {
       final int keyId = neighborIds[i];
       final float keyDist = neighborDistances[i];

@@ -50,6 +50,8 @@ public final class VertxHttpServer {
   FraudRequestParser requestFeatureExtractor;
 
   void onStart(final @Observes StartupEvent startupEvent) {
+    fraudVectorIndex.isReady();
+
     final HttpServerOptions serverOptions = new HttpServerOptions()
       .setPort(8080)
       .setHost("0.0.0.0")
