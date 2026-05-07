@@ -185,18 +185,47 @@ public final class OfflineIndexBuilder {
   }
 
   private static float[][] kMeans(final float[][] trainingData) {
-    final Random random = new Random(RANDOM_SEED);
+    final long seed = RANDOM_SEED;
     final int dataSize = trainingData.length;
+    final int sampleSize = Math.min(dataSize, 50_000);
+
+    final int[] sample = new int[sampleSize];
+    final long[] lcg = new long[]{seed};
+    for (int i = 0; i < sampleSize; i++) {
+      lcg[0] = lcg[0] * 6364136223846793005L + 1442695040888963407L;
+      sample[i] = (int) ((lcg[0] >>> 33) % dataSize);
+    }
 
     final float[][] centroids = new float[CLUSTER_COUNT][DIMENSIONS];
-    final boolean[] taken = new boolean[dataSize];
-    for (int cluster = 0; cluster < CLUSTER_COUNT; cluster++) {
-      int chosen;
-      do {
-        chosen = random.nextInt(dataSize);
-      } while (taken[chosen]);
-      taken[chosen] = true;
-      System.arraycopy(trainingData[chosen], 0, centroids[cluster], 0, DIMENSIONS);
+    final double[] minDists = new double[sampleSize];
+    Arrays.fill(minDists, Double.POSITIVE_INFINITY);
+
+    centroids[0] = trainingData[sample[0]].clone();
+
+    for (int k = 1; k < CLUSTER_COUNT; k++) {
+      final float[] lastCentroid = centroids[k - 1];
+      double total = 0;
+      for (int i = 0; i < sampleSize; i++) {
+        final float[] vec = trainingData[sample[i]];
+        final double d = squaredDistance(vec, lastCentroid);
+        if (d < minDists[i]) {
+          minDists[i] = d;
+        }
+        total += minDists[i];
+      }
+
+      lcg[0] = lcg[0] * 6364136223846793005L + 1442695040888963407L;
+      final double r = ((lcg[0] >>> 11) / (double) (1L << 53)) * total;
+      double cum = 0;
+      int chosen = sampleSize - 1;
+      for (int i = 0; i < sampleSize; i++) {
+        cum += minDists[i];
+        if (cum >= r) {
+          chosen = i;
+          break;
+        }
+      }
+      centroids[k] = trainingData[sample[chosen]].clone();
     }
 
     final int[] assignments = new int[dataSize];

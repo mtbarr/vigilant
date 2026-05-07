@@ -15,7 +15,22 @@ public final class NearestNeighborsBuffer {
     Arrays.fill(distances, Long.MAX_VALUE);
   }
 
-  public void tryInsert(final long candidateDistance, final byte fraudLabel, final int originalId) {
+  /**
+   * Reseta o buffer para reutilização via ThreadLocal. Deve ser chamado no início de cada request antes do primeiro
+   * {@link #tryInsert}.
+   */
+  public void reset() {
+    Arrays.fill(distances, Long.MAX_VALUE);
+    Arrays.fill(fraudLabels, (byte) 0); // necessário: evita labels obsoletos de requests anteriores
+    worstIndex = 0;
+  }
+
+  public void tryInsert(
+    final long candidateDistance,
+    final byte fraudLabel,
+    final int originalId
+  ) {
+
     final long worstDistance = distances[worstIndex];
     final int worstOriginalId = originalIds[worstIndex];
 
@@ -34,22 +49,23 @@ public final class NearestNeighborsBuffer {
 
   private void updateWorstIndex() {
     worstIndex = 0;
-    for (int position = 1; position < K_NEIGHBORS; position++) {
-      if (distances[position] > distances[worstIndex] ||
-          (distances[position] == distances[worstIndex] && originalIds[position] > originalIds[worstIndex])) {
-        worstIndex = position;
+    for (int i = 1; i < K_NEIGHBORS; i++) {
+      if ((distances[i] > distances[worstIndex]) ||
+          (distances[i] == distances[worstIndex] &&
+           originalIds[i] > originalIds[worstIndex])) {
+        worstIndex = i;
       }
     }
   }
 
   public int countFraudVotes() {
-    int voteCount = 0;
-    for (final byte fraudLabel : fraudLabels) {
-      if (fraudLabel == 1) {
-        voteCount++;
+    int votes = 0;
+    for (final byte label : fraudLabels) {
+      if (label == 1) {
+        votes++;
       }
     }
-    return voteCount;
+    return votes;
   }
 
   public long worstDistance() {
