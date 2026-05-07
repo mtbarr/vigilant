@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
-
 cd "$(dirname "$0")/.."
 
-echo "=== Building Docker image ==="
+echo "=== Building Docker image (full: index + app) ==="
 export API_IMAGE=vigilant:latest
 docker compose build
 
