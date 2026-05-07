@@ -20,14 +20,15 @@ public class InvertedFileIndex {
   private static final int FULL_PROBE_COUNT = 24;
 
   private int clusterCount;
-  private short[][] quantizedCentroids;
-  private short[][] bboxMinimum;
-  private short[][] bboxMaximum;
-  private int[] clusterStartOffset;
-  private int[] clusterEndOffset;
+  private int vectorCount;
   private short[][] dimensionsByVector;
   private byte[] vectorLabels;
   private int[] vectorOriginalIds;
+  private int[] clusterStartOffset;
+  private int[] clusterEndOffset;
+  private short[][] quantizedCentroids;
+  private short[][] bboxMinimum;
+  private short[][] bboxMaximum;
 
   private volatile boolean isIndexReady = false;
 
@@ -46,7 +47,7 @@ public class InvertedFileIndex {
   private void loadIndex(final String indexPath) throws IOException {
     final File indexFile = new File(indexPath);
     try (final RandomAccessFile file = new RandomAccessFile(indexFile, "r");
-      final FileChannel channel = file.getChannel()) {
+         final FileChannel channel = file.getChannel()) {
 
       final ByteBuffer buffer = channel.map(
         FileChannel.MapMode.READ_ONLY, 0, indexFile.length());
@@ -57,7 +58,7 @@ public class InvertedFileIndex {
         throw new IOException("Unknown index format: " + Integer.toHexString(magic));
       }
 
-      final int vectorCount = buffer.getInt();
+      vectorCount = buffer.getInt();
       clusterCount = buffer.getInt();
 
       final int dimensions = buffer.getInt();
@@ -98,16 +99,10 @@ public class InvertedFileIndex {
         clusterEndOffset[clusterIndex] = clusterOffsets[clusterIndex + 1];
       }
 
-      final short[] rawVectors = new short[vectorCount * DIMENSIONS];
-      for (int position = 0; position < vectorCount * DIMENSIONS; position++) {
-        rawVectors[position] = buffer.getShort();
-      }
-
       dimensionsByVector = new short[DIMENSIONS][vectorCount];
       for (int vectorIndex = 0; vectorIndex < vectorCount; vectorIndex++) {
-        final int basePosition = vectorIndex * DIMENSIONS;
         for (int dimension = 0; dimension < DIMENSIONS; dimension++) {
-          dimensionsByVector[dimension][vectorIndex] = rawVectors[basePosition + dimension];
+          dimensionsByVector[dimension][vectorIndex] = buffer.getShort();
         }
       }
 
@@ -131,12 +126,12 @@ public class InvertedFileIndex {
   }
 
   public int search(final float[] queryVectorFloat) {
-    final int k = clusterCount;
     final short[] queryQuantized = new short[DIMENSIONS];
     for (int dimension = 0; dimension < DIMENSIONS; dimension++) {
       queryQuantized[dimension] = quantize(queryVectorFloat[dimension]);
     }
 
+    final int k = clusterCount;
     final long[] centroidDistances = new long[k];
     for (int clusterIndex = 0; clusterIndex < k; clusterIndex++) {
       centroidDistances[clusterIndex] = vectorSquaredDistance(
@@ -176,15 +171,11 @@ public class InvertedFileIndex {
     return nearestNeighbors.countFraudVotes();
   }
 
-  private void scanCluster(
-    final short[] queryQuantized,
-    final int clusterIndex,
-    final NearestNeighborsBuffer nearestNeighbors
-  ) {
+  private void scanCluster(final short[] queryQuantized, final int clusterIndex,
+                           final NearestNeighborsBuffer nearestNeighbors) {
     final int endOffset = clusterEndOffset[clusterIndex];
     for (int vectorPosition = clusterStartOffset[clusterIndex]; vectorPosition < endOffset; vectorPosition++) {
       final long squaredDistance = vectorSquaredDistance(queryQuantized, vectorPosition);
-
       nearestNeighbors.tryInsert(
         squaredDistance,
         vectorLabels[vectorPosition],

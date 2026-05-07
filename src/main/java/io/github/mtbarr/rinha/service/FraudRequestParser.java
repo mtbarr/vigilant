@@ -69,11 +69,11 @@ public class FraudRequestParser {
     cursor.skipToField(FIELD_ID);
     final byte[] currentMerchantId = cursor.parseString();
 
+    cursor.skipToField(FIELD_MCC);
+    final int merchantCategoryCode = cursor.parseQuotedInt();
+
     cursor.skipToField(FIELD_AVG_AMOUNT);
     final float merchantAverageAmount = cursor.parseFloat();
-
-    cursor.skipToField(FIELD_MCC);
-    final int merchantCategoryCode = cursor.parseInt();
 
     cursor.skipToField(FIELD_IS_ONLINE);
     final boolean isOnlineTransaction = cursor.parseBoolean();
@@ -468,6 +468,22 @@ public class FraudRequestParser {
 
     int parseTwoDigits() {
       return readDigits(2);
+    }
+
+    int parseQuotedInt() {
+      skipWhitespace();
+      if (source[offset] == QUOTE) {
+        offset++;
+      }
+      int value = 0;
+      while (offset < source.length && isDigit(source[offset])) {
+        value = value * 10 + (source[offset] - '0');
+        offset++;
+      }
+      if (offset < source.length && source[offset] == QUOTE) {
+        offset++;
+      }
+      return value;
     }
 
 
