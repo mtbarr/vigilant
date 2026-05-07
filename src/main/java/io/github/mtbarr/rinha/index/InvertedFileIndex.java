@@ -5,6 +5,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import java.io.File;
 import java.io.IOException;
 import java.io.RandomAccessFile;
+import java.nio.ByteOrder;
 import java.nio.MappedByteBuffer;
 import java.nio.channels.FileChannel;
 import java.util.Arrays;
@@ -75,6 +76,8 @@ public class InvertedFileIndex {
         0,
         indexFile.length()
       );
+
+      entireFileBuffer.order(ByteOrder.LITTLE_ENDIAN);
 
       final int magicNumber = entireFileBuffer.getInt(0);
       if (magicNumber != 0x52494E44) {
