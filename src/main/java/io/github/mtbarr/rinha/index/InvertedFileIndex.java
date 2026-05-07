@@ -58,7 +58,6 @@ public class InvertedFileIndex {
     );
     try {
       loadIndexFromFile(indexPath);
-      runWarmupQueries();
       isIndexReady = true;
     } catch (final Exception exception) {
       System.err.println("Index not loaded: " + exception.getMessage());
@@ -159,7 +158,7 @@ public class InvertedFileIndex {
     final float[] warmupQuery = new float[NUM_DIMENSIONS];
     final int[] warmupNeighbors = new int[NUM_NEIGHBORS];
     final float[] warmupDistances = new float[NUM_NEIGHBORS];
-    for (int i = 0; i < 200; i++) {
+    for (int i = 0; i < 30; i++) {
       for (int d = 0; d < NUM_DIMENSIONS; d++) {
         warmupQuery[d] = (i * 7 + d) % 100 / 100f;
       }
