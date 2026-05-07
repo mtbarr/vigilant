@@ -242,7 +242,7 @@ public class FraudRequestParser {
     final int yearInCentury = yearOffset % 100;
     final int zellerResult = (day + (13 * (monthOffset + 1)) / 5 + yearInCentury
                               + yearInCentury / 4 + century / 4 - 2 * century) % 7;
-    return (zellerResult + 6) % 7;
+    return (zellerResult + 5) % 7;
   }
 
   static int computeMinutesBetween(
