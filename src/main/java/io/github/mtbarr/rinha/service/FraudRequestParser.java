@@ -45,6 +45,7 @@ public class FraudRequestParser {
 
     cursor.skipToField(FIELD_REQUESTED_AT);
     final int transactionYear = cursor.parseYear();
+    cursor.advance();
     final int transactionMonth = cursor.parseTwoDigits();
     cursor.advance();
     final int transactionDay = cursor.parseTwoDigits();
@@ -97,6 +98,7 @@ public class FraudRequestParser {
 
     if (hasPreviousTransaction) {
       final int previousYear = cursor.parseYear();
+      cursor.advance();
       final int previousMonth = cursor.parseTwoDigits();
       cursor.advance();
       final int previousDay = cursor.parseTwoDigits();
@@ -122,12 +124,21 @@ public class FraudRequestParser {
       requestBody, merchantListStart, merchantListEnd, currentMerchantId);
 
     return assembleFeatureVector(
-      transactionAmount, installmentCount, customerAverageAmount,
-      transactionHour, dayOfWeek(transactionYear, transactionMonth, transactionDay),
-      hasPreviousTransaction, minutesSincePrevious, distanceFromPrevious,
-      homeDistanceKilometers, recentTransactionCount,
-      isOnlineTransaction, isCardPresent, isUnknownMerchant,
-      merchantCategoryCode, merchantAverageAmount
+      transactionAmount,
+      installmentCount,
+      customerAverageAmount,
+      transactionHour,
+      dayOfWeek(transactionYear, transactionMonth, transactionDay),
+      hasPreviousTransaction,
+      minutesSincePrevious,
+      distanceFromPrevious,
+      homeDistanceKilometers,
+      recentTransactionCount,
+      isOnlineTransaction,
+      isCardPresent,
+      isUnknownMerchant,
+      merchantCategoryCode,
+      merchantAverageAmount
     );
   }
 
@@ -136,13 +147,22 @@ public class FraudRequestParser {
   }
 
   private static float[] assembleFeatureVector(
-    final float amount, final int installments, final float customerAverage,
-    final int hour, final float dayOfWeek,
-    final boolean hasPrevious, final int minutesSincePrevious, final float kilometersFromPrevious,
-    final float kilometersFromHome, final int transactionCount24h,
-    final boolean isOnline, final boolean isCardPresent,
-    final boolean isUnknownMerchant, final int merchantCategoryCode,
-    final float merchantAverageAmount) {
+    final float amount,
+    final int installments,
+    final float customerAverage,
+    final int hour,
+    final float dayOfWeek,
+    final boolean hasPrevious,
+    final int minutesSincePrevious,
+    final float kilometersFromPrevious,
+    final float kilometersFromHome,
+    final int transactionCount24h,
+    final boolean isOnline,
+    final boolean isCardPresent,
+    final boolean isUnknownMerchant,
+    final int merchantCategoryCode,
+    final float merchantAverageAmount
+  ) {
 
     final float[] featureVector = new float[14];
 
@@ -172,9 +192,12 @@ public class FraudRequestParser {
   }
 
 
-  private static boolean isMerchantInList(final byte[] source,
-                                          final int rangeStart, final int rangeEnd,
-                                          final byte[] targetMerchant) {
+  private static boolean isMerchantInList(
+    final byte[] source,
+    final int rangeStart,
+    final int rangeEnd,
+    final byte[] targetMerchant
+  ) {
     int position = rangeStart;
     while (position < rangeEnd) {
       if (source[position] == '"') {
