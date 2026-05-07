@@ -5,7 +5,7 @@ COPY . .
 RUN chmod +x gradlew
 RUN ./gradlew quarkusBuild \
     -Dquarkus.package.type=native \
-    -Dquarkus.native.additional-build-args="-march=haswell" \
+    -Dquarkus.native.additional-build-args="-march=haswell,--add-modules=jdk.incubator.vector" \
     --no-daemon
 
 FROM gcr.io/distroless/base-debian12
