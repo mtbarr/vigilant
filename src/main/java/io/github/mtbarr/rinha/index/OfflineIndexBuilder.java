@@ -8,7 +8,6 @@ import java.nio.ByteOrder;
 import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
-import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -512,7 +511,7 @@ public final class OfflineIndexBuilder {
     final long totalFileSize = invertedListsOffset;
 
     try (final var randomAccessFile = new RandomAccessFile(filePath, "rw");
-         final var fileChannel = randomAccessFile.getChannel()) {
+      final var fileChannel = randomAccessFile.getChannel()) {
       final ByteBuffer buffer = fileChannel.map(
         FileChannel.MapMode.READ_WRITE,
         0,
