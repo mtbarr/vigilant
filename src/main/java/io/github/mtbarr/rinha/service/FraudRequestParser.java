@@ -2,6 +2,7 @@ package io.github.mtbarr.rinha.service;
 
 import jakarta.enterprise.context.ApplicationScoped;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 
 @ApplicationScoped
 public final class FraudRequestParser {
@@ -495,14 +496,7 @@ public final class FraudRequestParser {
     final int patternLength = pattern.length;
     final int searchLimit = data.length - patternLength;
     for (int i = fromIndex; i <= searchLimit; i++) {
-      boolean isMatch = true;
-      for (int j = 0; j < patternLength; j++) {
-        if (data[i + j] != pattern[j]) {
-          isMatch = false;
-          break;
-        }
-      }
-      if (isMatch) {
+      if (data[i] == pattern[0] && Arrays.equals(data, i, i + patternLength, pattern, 0, patternLength)) {
         return i;
       }
     }
@@ -516,12 +510,8 @@ public final class FraudRequestParser {
     final int targetOffset,
     final int matchLength
   ) {
-    for (int i = 0; i < matchLength; i++) {
-      if (sourceArray[sourceOffset + i] != targetArray[targetOffset + i]) {
-        return false;
-      }
-    }
-    return true;
+    return Arrays.equals(sourceArray, sourceOffset, sourceOffset + matchLength,
+                         targetArray, targetOffset, targetOffset + matchLength);
   }
 
   private static byte[] encodeJsonKey(final String keyName) {

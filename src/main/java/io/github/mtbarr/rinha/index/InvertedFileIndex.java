@@ -10,6 +10,7 @@ import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.nio.ByteOrder;
 import java.nio.channels.FileChannel.MapMode;
+import java.util.Arrays;
 
 @ApplicationScoped
 public class InvertedFileIndex {
@@ -20,7 +21,7 @@ public class InvertedFileIndex {
   private static final int PQ_SUB_D = 2;
   private static final int PQ_CODEBOOK_SIZE = 256;
   private static final int NUM_PROBE_CLUSTERS = 64;
-  private static final int NUM_CANDIDATES = 200;
+  private static final int NUM_PROBE_GRAY = 32; // fast path: early exit if decision is clear
   private static final int NUM_NEIGHBORS = 5;
 
   private static final ValueLayout.OfInt INT_LE = ValueLayout.JAVA_INT.withOrder(ByteOrder.LITTLE_ENDIAN);
@@ -47,18 +48,6 @@ public class InvertedFileIndex {
   );
   private final ThreadLocal<float[][]> adcLookupTable = ThreadLocal.withInitial(
     () -> new float[PQ_M][PQ_CODEBOOK_SIZE]
-  );
-  private final ThreadLocal<int[]> coarseNeighborIds = ThreadLocal.withInitial(
-    () -> new int[NUM_CANDIDATES]
-  );
-  private final ThreadLocal<float[]> coarseNeighborDistances = ThreadLocal.withInitial(
-    () -> new float[NUM_CANDIDATES]
-  );
-  private final ThreadLocal<float[]> exactNeighborDistances = ThreadLocal.withInitial(
-    () -> new float[NUM_CANDIDATES]
-  );
-  private final ThreadLocal<float[]> vectorReadBuffer = ThreadLocal.withInitial(
-    () -> new float[NUM_DIMENSIONS]
   );
 
   @PostConstruct
@@ -185,11 +174,11 @@ public class InvertedFileIndex {
     final int[] centroidOrder = centroidOrderBuffer.get();
 
     for (int clusterIndex = 0; clusterIndex < NUM_CLUSTERS; clusterIndex++) {
-      float clusterDistance = 0;
+      float clusterDistance = 0.0f;
       final int centroidBase = clusterIndex * NUM_DIMENSIONS;
       for (int dimIndex = 0; dimIndex < NUM_DIMENSIONS; dimIndex++) {
         final float delta = queryVector[dimIndex] - ivfCentroidsFlat[centroidBase + dimIndex];
-        clusterDistance += delta * delta;
+        clusterDistance = Math.fma(delta, delta, clusterDistance);
       }
       centroidDistances[clusterIndex] = clusterDistance;
       centroidOrder[clusterIndex] = clusterIndex;
@@ -199,10 +188,8 @@ public class InvertedFileIndex {
     final float[][] adcTable = adcLookupTable.get();
     buildAdcLookupTable(queryVector, adcTable);
 
-    final int[] coarseIds = coarseNeighborIds.get();
-    final float[] coarseDists = coarseNeighborDistances.get();
-    java.util.Arrays.fill(coarseDists, Float.MAX_VALUE);
-    java.util.Arrays.fill(coarseIds, -1);
+    Arrays.fill(neighborIds, -1);
+    Arrays.fill(neighborDistances, Float.MAX_VALUE);
 
     for (int probeIndex = 0; probeIndex < NUM_PROBE_CLUSTERS; probeIndex++) {
       final int clusterIndex = centroidOrder[probeIndex];
@@ -215,49 +202,60 @@ public class InvertedFileIndex {
         final float approxDistance = computeAdcDistanceFromSegment(
           adcTable, codesOffset, itemIndex
         );
-        if (approxDistance < coarseDists[NUM_CANDIDATES - 1]) {
+        if (approxDistance < neighborDistances[NUM_NEIGHBORS - 1]) {
           final int globalId = indexSegment.get(INT_LE, idsOffset + (long) itemIndex * 4L);
           insertIntoSortedArray(
-            coarseIds,
-            coarseDists,
-            NUM_CANDIDATES,
+            neighborIds,
+            neighborDistances,
+            NUM_NEIGHBORS,
             globalId,
             approxDistance
           );
         }
       }
+
+      // Early exit after fast-path probes if decision is unambiguous
+      if (probeIndex == NUM_PROBE_GRAY - 1) {
+        int fastFraudCount = 0;
+        for (int i = 0; i < NUM_NEIGHBORS; i++) {
+          if (neighborIds[i] >= 0 && fraudLabels[neighborIds[i]] == 1) {
+            fastFraudCount++;
+          }
+        }
+        if (fastFraudCount <= 1 || fastFraudCount >= NUM_NEIGHBORS - 1) {
+          return fastFraudCount;
+        }
+        // Gray zone (2 or 3) — continue full scan
+      }
     }
 
-    final int[] exactIds = coarseNeighborIds.get();
-    final float[] exactDists = exactNeighborDistances.get();
-    final float[] vec = vectorReadBuffer.get();
-    System.arraycopy(coarseIds, 0, exactIds, 0, NUM_CANDIDATES);
-
-    for (int i = 0; i < NUM_CANDIDATES; i++) {
-      final int id = coarseIds[i];
+    // Light re-rank: only the top-5 candidates using exact distance
+    final float[] vec = new float[NUM_DIMENSIONS];
+    for (int i = 0; i < NUM_NEIGHBORS; i++) {
+      final int id = neighborIds[i];
       if (id < 0) {
-        exactDists[i] = Float.MAX_VALUE;
+        neighborDistances[i] = Float.MAX_VALUE;
         continue;
       }
       final long vectorPosition = vectorsOffset + (long) id * NUM_DIMENSIONS * 4L;
       for (int d = 0; d < NUM_DIMENSIONS; d++) {
         vec[d] = indexSegment.get(FLOAT_LE, vectorPosition + (long) d * 4L);
       }
-      exactDists[i] = computeSquaredDistance(queryVector, vec);
+      neighborDistances[i] = computeSquaredDistance(queryVector, vec);
     }
-
-    java.util.Arrays.fill(neighborIds, -1);
-    java.util.Arrays.fill(neighborDistances, Float.MAX_VALUE);
-    for (int i = 0; i < NUM_CANDIDATES; i++) {
-      if (exactIds[i] >= 0 && exactDists[i] < neighborDistances[NUM_NEIGHBORS - 1]) {
-        insertIntoSortedArray(
-          neighborIds,
-          neighborDistances,
-          NUM_NEIGHBORS,
-          exactIds[i],
-          exactDists[i]
-        );
+    // Re-sort the top-5 by exact distance (simple insertion sort for 5 elements)
+    for (int i = 1; i < NUM_NEIGHBORS; i++) {
+      final int keyId = neighborIds[i];
+      final float keyDist = neighborDistances[i];
+      if (keyId < 0) continue;
+      int j = i - 1;
+      while (j >= 0 && neighborDistances[j] > keyDist) {
+        neighborDistances[j + 1] = neighborDistances[j];
+        neighborIds[j + 1] = neighborIds[j];
+        j--;
       }
+      neighborDistances[j + 1] = keyDist;
+      neighborIds[j + 1] = keyId;
     }
 
     int fraudVoteCount = 0;
@@ -293,16 +291,16 @@ public class InvertedFileIndex {
       for (int codebookIndex = 0; codebookIndex < PQ_CODEBOOK_SIZE; codebookIndex++) {
         final float delta0 = queryComponent0 - codebookFlat[codebookIndex * 2];
         final float delta1 = queryComponent1 - codebookFlat[codebookIndex * 2 + 1];
-        tableRow[codebookIndex] = delta0 * delta0 + delta1 * delta1;
+        tableRow[codebookIndex] = Math.fma(delta0, delta0, delta1 * delta1);
       }
     }
   }
 
   private float computeSquaredDistance(final float[] vectorA, final float[] vectorB) {
-    float sum = 0;
+    float sum = 0.0f;
     for (int dimIndex = 0; dimIndex < NUM_DIMENSIONS; dimIndex++) {
       final float delta = vectorA[dimIndex] - vectorB[dimIndex];
-      sum += delta * delta;
+      sum = Math.fma(delta, delta, sum);
     }
     return sum;
   }

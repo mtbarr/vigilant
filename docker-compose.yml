@@ -13,7 +13,7 @@ services:
       resources:
         limits:
           cpus: "0.10"
-          memory: "50M"
+          memory: "30M"
 
   api1: &api
     image: ${API_IMAGE:-vigilant:latest}
@@ -24,7 +24,7 @@ services:
       resources:
         limits:
           cpus: "0.45"
-          memory: "150M"
+          memory: "160M"
 
   api2:
     <<: *api
