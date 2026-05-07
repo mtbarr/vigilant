@@ -498,11 +498,16 @@ public final class OfflineIndexBuilder {
     final long labelsOffset = vectorsOffset + (long) numVectors * NUM_DIMENSIONS * 4L;
 
     long invertedListsOffset = labelsOffset + numVectors;
+    if (invertedListsOffset % 4L != 0) {
+      invertedListsOffset = (invertedListsOffset + 3L) & ~3L;
+    }
     final long[] clusterListOffsets = new long[NUM_CLUSTERS];
     for (int c = 0; c < NUM_CLUSTERS; c++) {
       clusterListOffsets[c] = invertedListsOffset;
-      invertedListsOffset += 4L + (long) idsByCluster[c].length * 4L
-                             + (long) idsByCluster[c].length * PQ_M;
+      final long dataSize = 4L + (long) idsByCluster[c].length * 4L
+                            + (long) idsByCluster[c].length * PQ_M;
+      final long paddedSize = (dataSize + 3L) & ~3L;
+      invertedListsOffset += paddedSize;
     }
     final long totalFileSize = invertedListsOffset;
 
@@ -557,6 +562,11 @@ public final class OfflineIndexBuilder {
           buffer.putInt(id);
         }
         buffer.put(codesByCluster[c]);
+        final int dataLen = 4 + idsByCluster[c].length * 4 + idsByCluster[c].length * PQ_M;
+        final int padding = ((dataLen + 3) & ~3) - dataLen;
+        for (int p = 0; p < padding; p++) {
+          buffer.put((byte) 0);
+        }
       }
     }
 

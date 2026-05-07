@@ -136,7 +136,9 @@ public class InvertedFileIndex {
         clusterListOffsets[c] = offset;
         final int size = indexSegment.get(INT_LE, offset);
         clusterSizes[c] = size;
-        offset += 4L + (long) size * 4L + (long) size * PQ_M;
+        final long dataSize = 4L + (long) size * 4L + (long) size * PQ_M;
+        final long paddedSize = (dataSize + 3L) & ~3L;
+        offset += paddedSize;
       }
 
       int fraudCount = 0;
