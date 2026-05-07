@@ -60,7 +60,7 @@ public class InvertedFileIndex {
       loadIndexFromFile(indexPath);
       runWarmupQueries();
       isIndexReady = true;
-    } catch (final IOException exception) {
+    } catch (final Exception exception) {
       System.err.println("Index not loaded: " + exception.getMessage());
       isIndexReady = false;
     }

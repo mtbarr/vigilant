@@ -8,6 +8,10 @@ import java.nio.ByteOrder;
 import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.IntStream;
 import java.util.zip.GZIPInputStream;
@@ -37,8 +41,18 @@ public final class OfflineIndexBuilder {
     final String outputPath = args[1];
 
     System.out.println("Loading dataset...");
-    final float[][] vectors = loadFeatureVectors(inputPath);
-    final byte[] labels = loadFraudLabels(inputPath);
+    final byte[] rawData;
+    try (final var gzipInputStream = new GZIPInputStream(new FileInputStream(inputPath))) {
+      rawData = gzipInputStream.readAllBytes();
+    }
+
+    final ExecutorService parserExecutor = Executors.newFixedThreadPool(2);
+    final Future<float[][]> vectorsFuture = parserExecutor.submit(() -> parseFeatureVectors(rawData));
+    final Future<byte[]> labelsFuture = parserExecutor.submit(() -> parseFraudLabels(rawData));
+    final float[][] vectors = vectorsFuture.get();
+    final byte[] labels = labelsFuture.get();
+    parserExecutor.shutdownNow();
+
     final int numVectors = vectors.length;
     System.out.println("  " + numVectors + " vectors, fraud=" + countFraud(labels));
 
@@ -95,12 +109,7 @@ public final class OfflineIndexBuilder {
     System.out.println("Done.");
   }
 
-  private static float[][] loadFeatureVectors(final String filePath) throws IOException {
-    final byte[] rawData;
-    try (final var gzipInputStream = new GZIPInputStream(new FileInputStream(filePath))) {
-      rawData = gzipInputStream.readAllBytes();
-    }
-
+  private static float[][] parseFeatureVectors(final byte[] rawData) {
     final int estimatedCapacity = 3_200_000;
     final float[] flatVectors = new float[estimatedCapacity * NUM_DIMENSIONS];
     int vectorCount = 0;
@@ -139,12 +148,7 @@ public final class OfflineIndexBuilder {
     return result;
   }
 
-  private static byte[] loadFraudLabels(final String filePath) throws IOException {
-    final byte[] rawData;
-    try (final var gzipInputStream = new GZIPInputStream(new FileInputStream(filePath))) {
-      rawData = gzipInputStream.readAllBytes();
-    }
-
+  private static byte[] parseFraudLabels(final byte[] rawData) {
     final int estimatedCapacity = 3_200_000;
     final byte[] labels = new byte[estimatedCapacity];
     int labelCount = 0;
@@ -306,13 +310,32 @@ public final class OfflineIndexBuilder {
       }
       final double[][] centroidSums = new double[numClusters][NUM_DIMENSIONS];
       final int[] clusterCounts = new int[numClusters];
-      for (int i = 0; i < numVectors; i++) {
-        final int cluster = assignments[i];
-        clusterCounts[cluster]++;
-        for (int d = 0; d < NUM_DIMENSIONS; d++) {
-          centroidSums[cluster][d] += vectors[i][d];
+
+      final int processors = Runtime.getRuntime().availableProcessors();
+      final int chunkSize = (numVectors + processors - 1) / processors;
+      IntStream.range(0, processors).parallel().forEach(thread -> {
+        final int start = thread * chunkSize;
+        final int end = Math.min(start + chunkSize, numVectors);
+        final double[][] localSums = new double[numClusters][NUM_DIMENSIONS];
+        final int[] localCounts = new int[numClusters];
+        for (int i = start; i < end; i++) {
+          final int cluster = assignments[i];
+          localCounts[cluster]++;
+          for (int d = 0; d < NUM_DIMENSIONS; d++) {
+            localSums[cluster][d] += vectors[i][d];
+          }
         }
-      }
+        synchronized (centroidSums) {
+          for (int c = 0; c < numClusters; c++) {
+            if (localCounts[c] > 0) {
+              clusterCounts[c] += localCounts[c];
+              for (int d = 0; d < NUM_DIMENSIONS; d++) {
+                centroidSums[c][d] += localSums[c][d];
+              }
+            }
+          }
+        }
+      });
       for (int c = 0; c < numClusters; c++) {
         if (clusterCounts[c] > 0) {
           for (int d = 0; d < NUM_DIMENSIONS; d++) {
@@ -330,10 +353,10 @@ public final class OfflineIndexBuilder {
     final long seed
   ) {
     final float[][][] codebooks = new float[PQ_M][PQ_CODEBOOK_SIZE][PQ_SUB_D];
-    final float[][] subVectors = new float[vectors.length][PQ_SUB_D];
 
-    for (int subspaceIndex = 0; subspaceIndex < PQ_M; subspaceIndex++) {
+    IntStream.range(0, PQ_M).parallel().forEach(subspaceIndex -> {
       final int offset = subspaceIndex * PQ_SUB_D;
+      final float[][] subVectors = new float[vectors.length][PQ_SUB_D];
       for (int i = 0; i < vectors.length; i++) {
         subVectors[i][0] = vectors[i][offset];
         subVectors[i][1] = vectors[i][offset + 1];
@@ -344,7 +367,7 @@ public final class OfflineIndexBuilder {
         seed + subspaceIndex,
         maxIterations
       );
-    }
+    });
     return codebooks;
   }
 
@@ -413,7 +436,7 @@ public final class OfflineIndexBuilder {
   private static byte[][] encodeAllVectors(final float[][] vectors, final float[][][] codebooks) {
     final int numVectors = vectors.length;
     final byte[][] codes = new byte[numVectors][PQ_M];
-    for (int i = 0; i < numVectors; i++) {
+    IntStream.range(0, numVectors).parallel().forEach(i -> {
       for (int subspaceIndex = 0; subspaceIndex < PQ_M; subspaceIndex++) {
         final int offset = subspaceIndex * PQ_SUB_D;
         final float query0 = vectors[i][offset];
@@ -431,7 +454,7 @@ public final class OfflineIndexBuilder {
         }
         codes[i][subspaceIndex] = (byte) bestCentroid;
       }
-    }
+    });
     return codes;
   }
 

@@ -389,13 +389,7 @@ public final class FraudRequestParser {
       + (timestampBytes[timestampStart + 12] - CHAR_DIGIT_ZERO);
   }
 
-  private static int extractDayOfWeekFromTimestamp(
-    final byte[] timestampBytes,
-    final int timestampStart
-  ) {
-    final int year = parseDigitSequence(timestampBytes, timestampStart, 4);
-    int month = parseDigitSequence(timestampBytes, timestampStart + 5, 2);
-    final int day = parseDigitSequence(timestampBytes, timestampStart + 8, 2);
+  public static float dayOfWeek(final int year, final int month, final int day) {
     int adjustedYear = year;
     if (month < 3) {
       adjustedYear--;
@@ -407,6 +401,16 @@ public final class FraudRequestParser {
       + DAY_OF_WEEK_MONTH_TABLE[month - 1]
       + day) % 7;
     return (rawDayOfWeek + 6) % 7;
+  }
+
+  private static int extractDayOfWeekFromTimestamp(
+    final byte[] timestampBytes,
+    final int timestampStart
+  ) {
+    final int year = parseDigitSequence(timestampBytes, timestampStart, 4);
+    final int month = parseDigitSequence(timestampBytes, timestampStart + 5, 2);
+    final int day = parseDigitSequence(timestampBytes, timestampStart + 8, 2);
+    return (int) dayOfWeek(year, month, day);
   }
 
   private static long parseEpochSecondsFromTimestamp(
