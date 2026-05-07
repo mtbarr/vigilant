@@ -61,7 +61,7 @@ public class InvertedFileIndex {
     final File indexFile = new File(filePath);
     final long fileLength = indexFile.length();
     try (final var randomAccessFile = new RandomAccessFile(indexFile, "r");
-         final var fileChannel = randomAccessFile.getChannel()) {
+      final var fileChannel = randomAccessFile.getChannel()) {
 
       final MemorySegment indexSegment = fileChannel.map(MapMode.READ_ONLY, 0, fileLength, Arena.global());
 
@@ -130,7 +130,9 @@ public class InvertedFileIndex {
 
       int fraudCount = 0;
       for (byte label : fraudLabels) {
-        if (label == 1) fraudCount++;
+        if (label == 1) {
+          fraudCount++;
+        }
       }
       System.out.println("Index loaded: " + totalVectorCount + " vectors, " + fraudCount + " fraud");
     }
@@ -177,30 +179,43 @@ public class InvertedFileIndex {
       if (probe == NUM_PROBE_GRAY - 1) {
         int fc = 0;
         for (int k = 0; k < NUM_NEIGHBORS; k++) {
-          if (neighborIds[k] >= 0 && fraudLabels[neighborIds[k]] == 1) fc++;
+          if (neighborIds[k] >= 0 && fraudLabels[neighborIds[k]] == 1) {
+            fc++;
+          }
         }
-        if (fc <= 1 || fc >= NUM_NEIGHBORS - 1) return fc;
+        if (fc <= 1 || fc >= NUM_NEIGHBORS - 1) {
+          return fc;
+        }
       }
     }
 
     int fraudVoteCount = 0;
     for (int k = 0; k < NUM_NEIGHBORS; k++) {
-      if (neighborIds[k] >= 0 && fraudLabels[neighborIds[k]] == 1) fraudVoteCount++;
+      if (neighborIds[k] >= 0 && fraudLabels[neighborIds[k]] == 1) {
+        fraudVoteCount++;
+      }
     }
     return fraudVoteCount;
   }
 
-  private static float adcDistance(final float[][] table, final byte[] codes, final int off) {
+  private static float adcDistance(
+    final float[][] table,
+    final byte[] codes,
+    final int off
+  ) {
     return table[0][codes[off] & 0xFF]
-         + table[1][codes[off + 1] & 0xFF]
-         + table[2][codes[off + 2] & 0xFF]
-         + table[3][codes[off + 3] & 0xFF]
-         + table[4][codes[off + 4] & 0xFF]
-         + table[5][codes[off + 5] & 0xFF]
-         + table[6][codes[off + 6] & 0xFF];
+           + table[1][codes[off + 1] & 0xFF]
+           + table[2][codes[off + 2] & 0xFF]
+           + table[3][codes[off + 3] & 0xFF]
+           + table[4][codes[off + 4] & 0xFF]
+           + table[5][codes[off + 5] & 0xFF]
+           + table[6][codes[off + 6] & 0xFF];
   }
 
-  private void buildAdcLookupTable(final float[] queryVector, final float[][] lookupTable) {
+  private void buildAdcLookupTable(
+    final float[] queryVector,
+    final float[][] lookupTable
+  ) {
     for (int m = 0; m < PQ_M; m++) {
       final float q0 = queryVector[m * PQ_SUB_D];
       final float q1 = queryVector[m * PQ_SUB_D + 1];
@@ -219,7 +234,11 @@ public class InvertedFileIndex {
   }
 
   private static void insertIntoSortedArray(
-    final int[] ids, final float[] dists, final int max, final int newId, final float newDist
+    final int[] ids,
+    final float[] dists,
+    final int max,
+    final int newId,
+    final float newDist
   ) {
     int pos = max - 1;
     while (pos > 0 && dists[pos - 1] > newDist) {
@@ -231,7 +250,11 @@ public class InvertedFileIndex {
     ids[pos] = newId;
   }
 
-  private static void partialSortCentroids(final int[] order, final float[] dist, final int top) {
+  private static void partialSortCentroids(
+    final int[] order,
+    final float[] dist,
+    final int top
+  ) {
     quickselect(order, dist, 0, order.length - 1, top);
     for (int i = 1; i < top; i++) {
       final int o = order[i];
@@ -245,25 +268,47 @@ public class InvertedFileIndex {
     }
   }
 
-  private static void quickselect(final int[] order, final float[] dist, final int l, final int r, final int k) {
-    if (l >= r) return;
+  private static void quickselect(
+    final int[] order,
+    final float[] dist,
+    final int l,
+    final int r,
+    final int k
+  ) {
+    if (l >= r) {
+      return;
+    }
     final int pi = partition(order, dist, l, r);
     final int rank = pi - l + 1;
-    if (rank == k) return;
-    if (k < rank) quickselect(order, dist, l, pi - 1, k);
-    else quickselect(order, dist, pi + 1, r, k - rank);
+    if (rank == k) {
+      return;
+    }
+    if (k < rank) {
+      quickselect(order, dist, l, pi - 1, k);
+    } else {
+      quickselect(order, dist, pi + 1, r, k - rank);
+    }
   }
 
-  private static int partition(final int[] order, final float[] dist, final int l, final int r) {
+  private static int partition(
+    final int[] order,
+    final float[] dist,
+    final int l,
+    final int r
+  ) {
     final float pivot = dist[order[r]];
     int si = l - 1;
     for (int i = l; i < r; i++) {
       if (dist[order[i]] <= pivot) {
         si++;
-        final int tmp = order[si]; order[si] = order[i]; order[i] = tmp;
+        final int tmp = order[si];
+        order[si] = order[i];
+        order[i] = tmp;
       }
     }
-    final int tmp = order[si + 1]; order[si + 1] = order[r]; order[r] = tmp;
+    final int tmp = order[si + 1];
+    order[si + 1] = order[r];
+    order[r] = tmp;
     return si + 1;
   }
 }

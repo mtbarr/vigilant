@@ -73,10 +73,19 @@ public final class VertxHttpServer {
         }
         if (HTTP_METHOD_POST.equals(requestMethod) && PATH_FRAUD_SCORE.equals(requestPath)) {
           httpRequest.bodyHandler(requestBody -> {
-            final String responsePayload = buildFraudScoreResponse(requestBody.getBytes());
-            httpRequest.response()
-              .putHeader("Content-Type", CONTENT_TYPE_JSON)
-              .end(responsePayload);
+            final byte[] payload = requestBody.getBytes();
+            vertxEngine.executeBlocking(
+              () -> buildFraudScoreResponse(payload),
+              false
+            ).onSuccess(responsePayload -> {
+              httpRequest.response()
+                .putHeader("Content-Type", CONTENT_TYPE_JSON)
+                .end(responsePayload);
+            }).onFailure(err -> {
+              httpRequest.response()
+                .putHeader("Content-Type", CONTENT_TYPE_JSON)
+                .end(FRAUD_SCORE_RESPONSES[0]);
+            });
           });
           return;
         }
