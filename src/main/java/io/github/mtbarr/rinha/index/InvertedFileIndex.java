@@ -83,45 +83,43 @@ public class InvertedFileIndex {
         Arena.global()
       );
 
-      final int magicNumber = indexSegment.getAtIndex(INT_LE, 0);
+      final int magicNumber = indexSegment.get(INT_LE, 0);
       if (magicNumber != 0x52494E44) {
         throw new IOException("Bad magic: " + Integer.toHexString(magicNumber));
       }
-      final int versionNumber = indexSegment.getAtIndex(INT_LE, 4);
+      final int versionNumber = indexSegment.get(INT_LE, 4);
       if (versionNumber != 1) {
         throw new IOException("Bad version: " + versionNumber);
       }
-      final int storedClusters = indexSegment.getAtIndex(INT_LE, 8);
+      final int storedClusters = indexSegment.get(INT_LE, 8);
       if (storedClusters != NUM_CLUSTERS) {
         throw new IOException(
           "Expected K=" + NUM_CLUSTERS + " got " + storedClusters
         );
       }
-      final int totalVectorCount = indexSegment.getAtIndex(INT_LE, 12);
-      vectorsSectionOffset = indexSegment.getAtIndex(LONG_LE, 40);
-      clusterTableOffset = indexSegment.getAtIndex(LONG_LE, 32);
-      final long labelsSectionOffset = indexSegment.getAtIndex(LONG_LE, 48);
-
-      ivfCentroidsFlat = new float[NUM_CLUSTERS * NUM_DIMENSIONS];
-      final long centroidsSectionOffset = indexSegment.getAtIndex(LONG_LE, 16);
+      final int totalVectorCount = indexSegment.get(INT_LE, 12);
+      final long centroidsSectionOffset = indexSegment.get(LONG_LE, 16);
+      final long quantizationParamsOffset = indexSegment.get(LONG_LE, 24);
+      clusterTableOffset = indexSegment.get(LONG_LE, 32);
+      vectorsSectionOffset = indexSegment.get(LONG_LE, 40);
+      final long labelsSectionOffset = indexSegment.get(LONG_LE, 48);
       final MemorySegment centroidsSegment = indexSegment.asSlice(
         centroidsSectionOffset,
         (long) NUM_CLUSTERS * NUM_DIMENSIONS * 4L
       );
       for (int i = 0; i < NUM_CLUSTERS * NUM_DIMENSIONS; i++) {
-        ivfCentroidsFlat[i] = centroidsSegment.getAtIndex(FLOAT_LE, (long) i * 4L);
+        ivfCentroidsFlat[i] = centroidsSegment.get(FLOAT_LE, (long) i * 4L);
       }
 
       sq8ScaledMinValues = new float[NUM_DIMENSIONS];
       sq8InverseStep = new float[NUM_DIMENSIONS];
-      final long quantizationParamsOffset = indexSegment.getAtIndex(LONG_LE, 24);
       final MemorySegment paramsSegment = indexSegment.asSlice(
         quantizationParamsOffset,
         (long) NUM_DIMENSIONS * 2L * 4L
       );
       for (int d = 0; d < NUM_DIMENSIONS; d++) {
-        final float minValue = paramsSegment.getAtIndex(FLOAT_LE, (long) (d * 2) * 4L);
-        final float maxValue = paramsSegment.getAtIndex(FLOAT_LE, (long) (d * 2 + 1) * 4L);
+        final float minValue = paramsSegment.get(FLOAT_LE, (long) (d * 2) * 4L);
+        final float maxValue = paramsSegment.get(FLOAT_LE, (long) (d * 2 + 1) * 4L);
         sq8ScaledMinValues[d] = minValue;
         sq8InverseStep[d] = (maxValue - minValue) / (SQ8_LEVELS - 1);
       }
@@ -180,8 +178,8 @@ public class InvertedFileIndex {
       final int clusterIndex = centroidOrder[probeIndex];
       final long tableEntryOffset = clusterTableOffset
                                     + (long) clusterIndex * CLUSTER_TABLE_ENTRY_SIZE;
-      final int clusterBase = indexSegment.getAtIndex(INT_LE, tableEntryOffset);
-      final int clusterSize = indexSegment.getAtIndex(INT_LE, tableEntryOffset + 4L);
+      final int clusterBase = indexSegment.get(INT_LE, tableEntryOffset);
+      final int clusterSize = indexSegment.get(INT_LE, tableEntryOffset + 4L);
       final long clusterVectorStart = vectorsSectionOffset
                                       + (long) clusterBase * NUM_DIMENSIONS;
       final MemorySegment clusterSegment = indexSegment.asSlice(
