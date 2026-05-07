@@ -9,7 +9,6 @@ import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.nio.ByteOrder;
-import java.nio.channels.FileChannel;
 import java.nio.channels.FileChannel.MapMode;
 
 @ApplicationScoped
@@ -20,24 +19,24 @@ public class InvertedFileIndex {
   private static final int PQ_M = 7;
   private static final int PQ_SUB_D = 2;
   private static final int PQ_CODEBOOK_SIZE = 256;
-  private static final int NUM_PROBE_CLUSTERS = 24;
-  private static final int NUM_PROBE_GRAY = 8;
-  private static final int NUM_CANDIDATES = 50;
+  private static final int NUM_PROBE_CLUSTERS = 64;
+  private static final int NUM_CANDIDATES = 200;
   private static final int NUM_NEIGHBORS = 5;
 
   private static final ValueLayout.OfInt INT_LE = ValueLayout.JAVA_INT.withOrder(ByteOrder.LITTLE_ENDIAN);
   private static final ValueLayout.OfLong LONG_LE = ValueLayout.JAVA_LONG.withOrder(ByteOrder.LITTLE_ENDIAN);
   private static final ValueLayout.OfFloat FLOAT_LE = ValueLayout.JAVA_FLOAT.withOrder(ByteOrder.LITTLE_ENDIAN);
-  private static final ValueLayout.OfByte BYTE_LE = ValueLayout.JAVA_BYTE;
 
   private MemorySegment indexSegment;
   private float[] ivfCentroidsFlat;
   private float[][] pqCodebooksFlat;
   private byte[] fraudLabels;
+  private int totalVectorCount;
   private long vectorsOffset;
   private long labelsOffset;
   private long invertedListsOffset;
-  private int totalVectorCount;
+  private int[] clusterSizes;
+  private long[] clusterListOffsets;
   private volatile boolean isIndexReady = false;
 
   private final ThreadLocal<float[]> centroidDistanceBuffer = ThreadLocal.withInitial(
@@ -81,7 +80,7 @@ public class InvertedFileIndex {
   private void loadIndexFromFile(final String filePath) throws IOException {
     final File indexFile = new File(filePath);
     try (final var randomAccessFile = new RandomAccessFile(indexFile, "r");
-         final var fileChannel = randomAccessFile.getChannel()) {
+      final var fileChannel = randomAccessFile.getChannel()) {
       indexSegment = fileChannel.map(
         MapMode.READ_ONLY,
         0,
@@ -104,7 +103,6 @@ public class InvertedFileIndex {
       totalVectorCount = indexSegment.get(INT_LE, 12);
       vectorsOffset = indexSegment.get(LONG_LE, 16);
       labelsOffset = indexSegment.get(LONG_LE, 24);
-      invertedListsOffset = 0;
 
       final long centroidsOffset = 36L;
       ivfCentroidsFlat = new float[NUM_CLUSTERS * NUM_DIMENSIONS];
@@ -133,8 +131,7 @@ public class InvertedFileIndex {
         }
       }
 
-      final long invertedListsStart = labelsOffset + totalVectorCount;
-      invertedListsOffset = invertedListsStart;
+      invertedListsOffset = labelsOffset + totalVectorCount;
 
       fraudLabels = new byte[totalVectorCount];
       final MemorySegment labelsSegment = indexSegment.asSlice(
@@ -143,15 +140,27 @@ public class InvertedFileIndex {
       );
       labelsSegment.asByteBuffer().get(fraudLabels);
 
-      System.out.println("Index loaded: " + totalVectorCount + " vectors, "
-                         + "vectorsOffset=" + vectorsOffset
-                         + ", labelsOffset=" + labelsOffset
-                         + ", invertedListsOffset=" + invertedListsStart);
+      clusterSizes = new int[NUM_CLUSTERS];
+      clusterListOffsets = new long[NUM_CLUSTERS];
+      long offset = invertedListsOffset;
+      for (int c = 0; c < NUM_CLUSTERS; c++) {
+        clusterListOffsets[c] = offset;
+        final int size = indexSegment.get(INT_LE, offset);
+        clusterSizes[c] = size;
+        offset += 4L + (long) size * 4L + (long) size * PQ_M;
+      }
+
       int fraudCount = 0;
       for (byte label : fraudLabels) {
-        if (label == 1) fraudCount++;
+        if (label == 1) {
+          fraudCount++;
+        }
       }
-      System.out.println("Fraud labels: " + fraudCount + " / " + totalVectorCount);
+      System.out.println("Index loaded: " + totalVectorCount + " vectors, "
+                         + fraudCount + " fraud, "
+                         + "vectorsOffset=" + vectorsOffset
+                         + ", labelsOffset=" + labelsOffset
+                         + ", invertedListsOffset=" + invertedListsOffset);
     }
   }
 
@@ -197,44 +206,24 @@ public class InvertedFileIndex {
 
     for (int probeIndex = 0; probeIndex < NUM_PROBE_CLUSTERS; probeIndex++) {
       final int clusterIndex = centroidOrder[probeIndex];
-      final long clusterListOffset = readClusterListOffset(clusterIndex);
-      final int clusterSize = readClusterSize(clusterListOffset);
-      final int[] clusterIds = readClusterIds(clusterListOffset, clusterSize);
-      final byte[] clusterPqCodes = readClusterPqCodes(clusterListOffset, clusterSize);
+      final long listOffset = clusterListOffsets[clusterIndex];
+      final int clusterSize = clusterSizes[clusterIndex];
+      final long idsOffset = listOffset + 4L;
+      final long codesOffset = listOffset + 4L + (long) clusterSize * 4L;
 
       for (int itemIndex = 0; itemIndex < clusterSize; itemIndex++) {
-        final float approxDistance = computeAdcDistance(adcTable, clusterPqCodes, itemIndex * PQ_M);
+        final float approxDistance = computeAdcDistanceFromSegment(
+          adcTable, codesOffset, itemIndex
+        );
         if (approxDistance < coarseDists[NUM_CANDIDATES - 1]) {
+          final int globalId = indexSegment.get(INT_LE, idsOffset + (long) itemIndex * 4L);
           insertIntoSortedArray(
             coarseIds,
             coarseDists,
             NUM_CANDIDATES,
-            clusterIds[itemIndex],
+            globalId,
             approxDistance
           );
-        }
-      }
-
-      if (probeIndex == NUM_PROBE_GRAY - 1) {
-        int fraudCount = 0;
-        for (int i = 0; i < NUM_NEIGHBORS; i++) {
-          if (coarseIds[i] >= 0 && fraudLabels[coarseIds[i]] == 1) {
-            fraudCount++;
-          }
-        }
-        if (fraudCount <= 1 || fraudCount >= NUM_NEIGHBORS - 1) {
-          java.util.Arrays.fill(neighborIds, -1);
-          java.util.Arrays.fill(neighborDistances, Float.MAX_VALUE);
-          for (int i = 0; i < NUM_CANDIDATES; i++) {
-            if (coarseIds[i] >= 0 && coarseDists[i] < neighborDistances[NUM_NEIGHBORS - 1]) {
-              insertIntoSortedArray(neighborIds, neighborDistances, NUM_NEIGHBORS, coarseIds[i], coarseDists[i]);
-            }
-          }
-          int fc = 0;
-          for (int i = 0; i < NUM_NEIGHBORS; i++) {
-            if (neighborIds[i] >= 0 && fraudLabels[neighborIds[i]] == 1) fc++;
-          }
-          return fc;
         }
       }
     }
@@ -243,8 +232,6 @@ public class InvertedFileIndex {
     final float[] exactDists = exactNeighborDistances.get();
     final float[] vec = vectorReadBuffer.get();
     System.arraycopy(coarseIds, 0, exactIds, 0, NUM_CANDIDATES);
-
-    final long vectorBytesStart = (long) totalVectorCount * NUM_DIMENSIONS * 4L + vectorsOffset;
 
     for (int i = 0; i < NUM_CANDIDATES; i++) {
       final int id = coarseIds[i];
@@ -282,39 +269,19 @@ public class InvertedFileIndex {
     return fraudVoteCount;
   }
 
-  private long readClusterListOffset(final int clusterIndex) {
-    long offset = invertedListsOffset;
-    for (int c = 0; c < clusterIndex; c++) {
-      final int size = indexSegment.get(INT_LE, offset);
-      offset += 4L + (long) size * 4L + (long) size * PQ_M;
-    }
-    return offset;
-  }
-
-  private int readClusterSize(final long clusterListOffset) {
-    return indexSegment.get(INT_LE, clusterListOffset);
-  }
-
-  private int[] readClusterIds(final long clusterListOffset, final int clusterSize) {
-    final int[] ids = new int[clusterSize];
-    final MemorySegment idsSegment = indexSegment.asSlice(
-      clusterListOffset + 4L,
-      (long) clusterSize * 4L
-    );
-    for (int i = 0; i < clusterSize; i++) {
-      ids[i] = idsSegment.get(INT_LE, (long) i * 4L);
-    }
-    return ids;
-  }
-
-  private byte[] readClusterPqCodes(final long clusterListOffset, final int clusterSize) {
-    final byte[] codes = new byte[clusterSize * PQ_M];
-    final MemorySegment codesSegment = indexSegment.asSlice(
-      clusterListOffset + 4L + (long) clusterSize * 4L,
-      (long) clusterSize * PQ_M
-    );
-    codesSegment.asByteBuffer().get(codes);
-    return codes;
+  private float computeAdcDistanceFromSegment(
+    final float[][] lookupTable,
+    final long codesBaseOffset,
+    final int itemIndex
+  ) {
+    final long codeOffset = codesBaseOffset + (long) itemIndex * PQ_M;
+    return lookupTable[0][indexSegment.get(ValueLayout.JAVA_BYTE, codeOffset) & 0xFF]
+           + lookupTable[1][indexSegment.get(ValueLayout.JAVA_BYTE, codeOffset + 1) & 0xFF]
+           + lookupTable[2][indexSegment.get(ValueLayout.JAVA_BYTE, codeOffset + 2) & 0xFF]
+           + lookupTable[3][indexSegment.get(ValueLayout.JAVA_BYTE, codeOffset + 3) & 0xFF]
+           + lookupTable[4][indexSegment.get(ValueLayout.JAVA_BYTE, codeOffset + 4) & 0xFF]
+           + lookupTable[5][indexSegment.get(ValueLayout.JAVA_BYTE, codeOffset + 5) & 0xFF]
+           + lookupTable[6][indexSegment.get(ValueLayout.JAVA_BYTE, codeOffset + 6) & 0xFF];
   }
 
   private void buildAdcLookupTable(final float[] queryVector, final float[][] lookupTable) {
@@ -329,16 +296,6 @@ public class InvertedFileIndex {
         tableRow[codebookIndex] = delta0 * delta0 + delta1 * delta1;
       }
     }
-  }
-
-  private float computeAdcDistance(final float[][] lookupTable, final byte[] pqCodes, final int codeOffset) {
-    return lookupTable[0][pqCodes[codeOffset] & 0xFF]
-      + lookupTable[1][pqCodes[codeOffset + 1] & 0xFF]
-      + lookupTable[2][pqCodes[codeOffset + 2] & 0xFF]
-      + lookupTable[3][pqCodes[codeOffset + 3] & 0xFF]
-      + lookupTable[4][pqCodes[codeOffset + 4] & 0xFF]
-      + lookupTable[5][pqCodes[codeOffset + 5] & 0xFF]
-      + lookupTable[6][pqCodes[codeOffset + 6] & 0xFF];
   }
 
   private float computeSquaredDistance(final float[] vectorA, final float[] vectorB) {
