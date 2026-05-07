@@ -33,8 +33,6 @@ public class InvertedFileIndex {
   private byte[] fraudLabels;
   private int[][] idsByCluster;
   private byte[][] codesByCluster;
-  private long vectorsOffset;
-  private MemorySegment vectorsSegment;
   private volatile boolean isIndexReady = false;
 
   private final ThreadLocal<float[]> centroidDistanceBuffer = ThreadLocal.withInitial(
@@ -80,10 +78,7 @@ public class InvertedFileIndex {
         throw new IOException("Expected K=" + NUM_CLUSTERS + " got " + storedClusters);
       }
       final int totalVectorCount = indexSegment.get(INT_LE, 12);
-      vectorsOffset = indexSegment.get(LONG_LE, 16);
       final long labelsOffset = indexSegment.get(LONG_LE, 24);
-      final long vectorsSectionSize = labelsOffset - vectorsOffset;
-      vectorsSegment = indexSegment.asSlice(vectorsOffset, vectorsSectionSize);
 
       final long centroidsOffset = 36L;
       ivfCentroidsFlat = new float[NUM_CLUSTERS * NUM_DIMENSIONS];
@@ -188,17 +183,6 @@ public class InvertedFileIndex {
       }
     }
 
-    // Re-rank top-5 with exact distance (only touches MemorySegment for 5 vectors = 280 bytes)
-    final float[] vec = new float[NUM_DIMENSIONS];
-    for (int k = 0; k < NUM_NEIGHBORS; k++) {
-      final int id = neighborIds[k];
-      if (id < 0) continue;
-      for (int d = 0; d < NUM_DIMENSIONS; d++) {
-        vec[d] = vectorsSegment.get(FLOAT_LE, (long) id * NUM_DIMENSIONS * 4L + (long) d * 4L);
-      }
-      neighborDistances[k] = squaredDistance(queryVector, vec);
-    }
-
     int fraudVoteCount = 0;
     for (int k = 0; k < NUM_NEIGHBORS; k++) {
       if (neighborIds[k] >= 0 && fraudLabels[neighborIds[k]] == 1) fraudVoteCount++;
@@ -230,13 +214,8 @@ public class InvertedFileIndex {
     }
   }
 
-  private static float squaredDistance(final float[] a, final float[] b) {
-    float sum = 0.0f;
-    for (int d = 0; d < NUM_DIMENSIONS; d++) {
-      final float delta = a[d] - b[d];
-      sum = Math.fma(delta, delta, sum);
-    }
-    return sum;
+  public boolean isReady() {
+    return isIndexReady;
   }
 
   private static void insertIntoSortedArray(
@@ -286,9 +265,5 @@ public class InvertedFileIndex {
     }
     final int tmp = order[si + 1]; order[si + 1] = order[r]; order[r] = tmp;
     return si + 1;
-  }
-
-  public boolean isReady() {
-    return isIndexReady;
   }
 }

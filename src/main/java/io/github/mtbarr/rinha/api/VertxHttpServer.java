@@ -67,7 +67,8 @@ public final class VertxHttpServer {
         if (HTTP_METHOD_GET.equals(requestMethod) && PATH_READY.equals(requestPath)) {
           httpRequest.response()
             .putHeader("Content-Type", CONTENT_TYPE_TEXT)
-            .end(HEALTH_CHECK_RESPONSE);
+            .setStatusCode(fraudVectorIndex.isReady() ? 200 : 503)
+            .end(fraudVectorIndex.isReady() ? HEALTH_CHECK_RESPONSE : "Not ready");
           return;
         }
         if (HTTP_METHOD_POST.equals(requestMethod) && PATH_FRAUD_SCORE.equals(requestPath)) {
