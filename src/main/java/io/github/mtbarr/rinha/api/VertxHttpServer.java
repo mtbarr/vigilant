@@ -8,11 +8,11 @@ import io.vertx.core.http.HttpServerOptions;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
-import java.nio.charset.StandardCharsets;
 
 @ApplicationScoped
 public class VertxHttpServer {
 
+  // cached responses
   private static final String EMPTY_RESPONSE = "{\"approved\":true,\"fraud_score\":0.0}";
   private static final String NOT_FOUND = "Not found";
   private static final String READY_RESPONSE = "OK";
