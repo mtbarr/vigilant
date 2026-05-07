@@ -2,10 +2,11 @@ package io.github.mtbarr.rinha.api;
 
 import io.github.mtbarr.rinha.index.InvertedFileIndex;
 import io.github.mtbarr.rinha.service.FraudRequestParser;
+import io.quarkus.runtime.StartupEvent;
 import io.vertx.core.Vertx;
 import io.vertx.core.http.HttpServerOptions;
-import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 
 @ApplicationScoped
@@ -48,12 +49,7 @@ public final class VertxHttpServer {
   @Inject
   FraudRequestParser requestFeatureExtractor;
 
-  @PostConstruct
-  void startServer() {
-    // Eagerly initialize the index BEFORE the server starts — avoids 6s+
-    // CDI lazy init running on the Vert.x event loop during the first request.
-    System.out.println("Index ready: " + fraudVectorIndex.isReady());
-
+  void onStart(final @Observes StartupEvent startupEvent) {
     final HttpServerOptions serverOptions = new HttpServerOptions()
       .setPort(8080)
       .setHost("0.0.0.0")
