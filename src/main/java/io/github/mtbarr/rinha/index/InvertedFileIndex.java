@@ -8,6 +8,8 @@ import java.io.RandomAccessFile;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
+import java.nio.ByteOrder;
+import java.nio.channels.FileChannel;
 import java.nio.channels.FileChannel.MapMode;
 import java.util.Arrays;
 
@@ -23,6 +25,11 @@ public class InvertedFileIndex {
 
   private static final long HEADER_SIZE = 56L;
   private static final long CLUSTER_TABLE_ENTRY_SIZE = 8L;
+
+  private static final ValueLayout.OfInt INT_LE = ValueLayout.JAVA_INT.withOrder(ByteOrder.LITTLE_ENDIAN);
+  private static final ValueLayout.OfLong LONG_LE = ValueLayout.JAVA_LONG.withOrder(ByteOrder.LITTLE_ENDIAN);
+  private static final ValueLayout.OfFloat FLOAT_LE = ValueLayout.JAVA_FLOAT.withOrder(ByteOrder.LITTLE_ENDIAN);
+  private static final ValueLayout.OfByte BYTE_LE = ValueLayout.JAVA_BYTE;
 
   private MemorySegment indexSegment;
   private float[] ivfCentroidsFlat;
@@ -68,7 +75,7 @@ public class InvertedFileIndex {
   private void loadIndexFromFile(final String filePath) throws IOException {
     final File indexFile = new File(filePath);
     try (final var randomAccessFile = new RandomAccessFile(indexFile, "r");
-      final var fileChannel = randomAccessFile.getChannel()) {
+         final var fileChannel = randomAccessFile.getChannel()) {
       indexSegment = fileChannel.map(
         MapMode.READ_ONLY,
         0,
@@ -76,82 +83,45 @@ public class InvertedFileIndex {
         Arena.global()
       );
 
-      final int magicNumber = indexSegment.getAtIndex(
-        ValueLayout.JAVA_INT,
-        0
-      );
+      final int magicNumber = indexSegment.getAtIndex(INT_LE, 0);
       if (magicNumber != 0x52494E44) {
         throw new IOException("Bad magic: " + Integer.toHexString(magicNumber));
       }
-      final int versionNumber = indexSegment.getAtIndex(
-        ValueLayout.JAVA_INT,
-        4
-      );
+      final int versionNumber = indexSegment.getAtIndex(INT_LE, 4);
       if (versionNumber != 1) {
         throw new IOException("Bad version: " + versionNumber);
       }
-      final int storedClusters = indexSegment.getAtIndex(
-        ValueLayout.JAVA_INT,
-        8
-      );
+      final int storedClusters = indexSegment.getAtIndex(INT_LE, 8);
       if (storedClusters != NUM_CLUSTERS) {
         throw new IOException(
           "Expected K=" + NUM_CLUSTERS + " got " + storedClusters
         );
       }
-      final int totalVectorCount = indexSegment.getAtIndex(
-        ValueLayout.JAVA_INT,
-        12
-      );
-      final long centroidsSectionOffset = indexSegment.getAtIndex(
-        ValueLayout.JAVA_LONG,
-        16
-      );
-      final long quantizationParamsOffset = indexSegment.getAtIndex(
-        ValueLayout.JAVA_LONG,
-        24
-      );
-      clusterTableOffset = indexSegment.getAtIndex(
-        ValueLayout.JAVA_LONG,
-        32
-      );
-      vectorsSectionOffset = indexSegment.getAtIndex(
-        ValueLayout.JAVA_LONG,
-        40
-      );
-      final long labelsSectionOffset = indexSegment.getAtIndex(
-        ValueLayout.JAVA_LONG,
-        48
-      );
+      final int totalVectorCount = indexSegment.getAtIndex(INT_LE, 12);
+      vectorsSectionOffset = indexSegment.getAtIndex(LONG_LE, 40);
+      clusterTableOffset = indexSegment.getAtIndex(LONG_LE, 32);
+      final long labelsSectionOffset = indexSegment.getAtIndex(LONG_LE, 48);
 
       ivfCentroidsFlat = new float[NUM_CLUSTERS * NUM_DIMENSIONS];
+      final long centroidsSectionOffset = indexSegment.getAtIndex(LONG_LE, 16);
       final MemorySegment centroidsSegment = indexSegment.asSlice(
         centroidsSectionOffset,
         (long) NUM_CLUSTERS * NUM_DIMENSIONS * 4L
       );
-      centroidsSegment.asByteBuffer().order(java.nio.ByteOrder.LITTLE_ENDIAN);
       for (int i = 0; i < NUM_CLUSTERS * NUM_DIMENSIONS; i++) {
-        ivfCentroidsFlat[i] = centroidsSegment.getAtIndex(
-          ValueLayout.JAVA_FLOAT,
-          (long) i * 4L
-        );
+        ivfCentroidsFlat[i] = centroidsSegment.getAtIndex(FLOAT_LE, (long) i * 4L);
       }
 
       sq8ScaledMinValues = new float[NUM_DIMENSIONS];
       sq8InverseStep = new float[NUM_DIMENSIONS];
+      final long quantizationParamsOffset = indexSegment.getAtIndex(LONG_LE, 24);
       final MemorySegment paramsSegment = indexSegment.asSlice(
         quantizationParamsOffset,
         (long) NUM_DIMENSIONS * 2L * 4L
       );
       for (int d = 0; d < NUM_DIMENSIONS; d++) {
-        final float minValue = paramsSegment.getAtIndex(
-          ValueLayout.JAVA_FLOAT,
-          (long) (d * 2) * 4L
-        );
-        final float maxValue = paramsSegment.getAtIndex(
-          ValueLayout.JAVA_FLOAT,
-          (long) (d * 2 + 1) * 4L
-        );
+        final float minValue = paramsSegment.getAtIndex(FLOAT_LE, (long) (d * 2) * 4L);
+        final float maxValue = paramsSegment.getAtIndex(FLOAT_LE, (long) (d * 2 + 1) * 4L);
         sq8ScaledMinValues[d] = minValue;
         sq8InverseStep[d] = (maxValue - minValue) / (SQ8_LEVELS - 1);
       }
@@ -210,16 +180,8 @@ public class InvertedFileIndex {
       final int clusterIndex = centroidOrder[probeIndex];
       final long tableEntryOffset = clusterTableOffset
                                     + (long) clusterIndex * CLUSTER_TABLE_ENTRY_SIZE;
-      final int clusterBase = indexSegment.getAtIndex(
-        ValueLayout.JAVA_INT,
-        tableEntryOffset
-      );
-
-      final int clusterSize = indexSegment.getAtIndex(
-        ValueLayout.JAVA_INT,
-        tableEntryOffset + 4L
-      );
-
+      final int clusterBase = indexSegment.getAtIndex(INT_LE, tableEntryOffset);
+      final int clusterSize = indexSegment.getAtIndex(INT_LE, tableEntryOffset + 4L);
       final long clusterVectorStart = vectorsSectionOffset
                                       + (long) clusterBase * NUM_DIMENSIONS;
       final MemorySegment clusterSegment = indexSegment.asSlice(
@@ -276,7 +238,7 @@ public class InvertedFileIndex {
     float sum = 0;
     for (int d = 0; d < NUM_DIMENSIONS; d++) {
       final float diff = scaledQuery[d] - (clusterSegment.getAtIndex(
-        ValueLayout.JAVA_BYTE,
+        BYTE_LE,
         vectorOffset + d
       ) & 0xFF);
       sum += diff * diff;
