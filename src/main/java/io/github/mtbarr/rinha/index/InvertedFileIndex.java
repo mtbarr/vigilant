@@ -40,9 +40,7 @@ public class InvertedFileIndex {
   private final ThreadLocal<int[]> requestGenerationCounter = withInitial(() -> new int[1]);
   private final ThreadLocal<short[]> quantizedQueryBuffer = withInitial(() -> new short[DIMENSIONS]);
   private final ThreadLocal<int[]> probeIndexBuffer = withInitial(() -> new int[FULL_PROBE_COUNT]);
-
-
-  private final ThreadLocal<NearestNeighborsBuffer> tlBuffer = withInitial(NearestNeighborsBuffer::new);
+  private final ThreadLocal<NearestNeighborsBuffer> nearestNeighborsBuffer = withInitial(NearestNeighborsBuffer::new);
 
 
   @PostConstruct
@@ -61,8 +59,7 @@ public class InvertedFileIndex {
     try (final RandomAccessFile file = new RandomAccessFile(indexFile, "r");
       final FileChannel channel = file.getChannel()) {
 
-      final ByteBuffer buf = channel.map(
-        FileChannel.MapMode.READ_ONLY, 0, indexFile.length());
+      final ByteBuffer buf = channel.map(FileChannel.MapMode.READ_ONLY, 0, indexFile.length());
       buf.order(ByteOrder.LITTLE_ENDIAN);
 
       final int magic = buf.getInt();
@@ -161,7 +158,7 @@ public class InvertedFileIndex {
 
     final short[] query = quantizedQueryBuffer.get();
     final int[] probes = probeIndexBuffer.get();
-    final NearestNeighborsBuffer buf = tlBuffer.get();
+    final NearestNeighborsBuffer buf = nearestNeighborsBuffer.get();
     buf.reset();
 
     for (int d = 0; d < DIMENSIONS; d++) {
