@@ -50,6 +50,10 @@ public final class VertxHttpServer {
   FraudRequestParser requestFeatureExtractor;
 
   void onStart(final @Observes StartupEvent startupEvent) {
+    // Eagerly initialize the index BEFORE the server starts — avoids 6s+
+    // CDI lazy init running on the Vert.x event loop during the first request.
+    System.out.println("Index ready: " + fraudVectorIndex.isReady());
+
     final HttpServerOptions serverOptions = new HttpServerOptions()
       .setPort(8080)
       .setHost("0.0.0.0")
