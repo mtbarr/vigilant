@@ -5,11 +5,11 @@ import io.github.mtbarr.rinha.service.FraudRequestParser;
 import io.quarkus.runtime.StartupEvent;
 import io.vertx.core.Vertx;
 import io.vertx.core.http.HttpServerOptions;
-import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
+import jakarta.inject.Singleton;
 
-@ApplicationScoped
+@Singleton
 public final class VertxHttpServer {
 
   private static final int NEIGHBOR_COUNT = 5;
@@ -73,7 +73,7 @@ public final class VertxHttpServer {
         }
         if (HTTP_METHOD_POST.equals(requestMethod) && PATH_FRAUD_SCORE.equals(requestPath)) {
           httpRequest.bodyHandler(requestBody -> {
-            final byte[] payload = requestBody.getBytes();
+            final String payload = requestBody.toString();
             vertxEngine.executeBlocking(
               () -> buildFraudScoreResponse(payload),
               false
@@ -96,7 +96,7 @@ public final class VertxHttpServer {
       .listen();
   }
 
-  private String buildFraudScoreResponse(final byte[] requestPayload) {
+  private String buildFraudScoreResponse(final String requestPayload) {
     try {
       final float[] featureVector = requestFeatureExtractor.extractFeatureVector(requestPayload);
       final int[] neighborIds = neighborIdBuffer.get();

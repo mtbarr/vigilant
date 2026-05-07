@@ -17,7 +17,7 @@ import java.util.zip.GZIPInputStream;
 
 public final class OfflineIndexBuilder {
 
-  private static final int NUM_CLUSTERS = 512;
+  private static final int NUM_CLUSTERS = 1024;
   private static final int NUM_DIMENSIONS = 14;
   private static final int PQ_M = 7;
   private static final int PQ_SUB_D = 2;

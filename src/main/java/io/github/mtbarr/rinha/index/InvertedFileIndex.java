@@ -1,7 +1,7 @@
 package io.github.mtbarr.rinha.index;
 
 import jakarta.annotation.PostConstruct;
-import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Singleton;
 import java.io.File;
 import java.io.IOException;
 import java.io.RandomAccessFile;
@@ -12,16 +12,16 @@ import java.nio.ByteOrder;
 import java.nio.channels.FileChannel.MapMode;
 import java.util.Arrays;
 
-@ApplicationScoped
+@Singleton
 public class InvertedFileIndex {
 
-  private static final int NUM_CLUSTERS = 512;
+  private static final int NUM_CLUSTERS = 1024;
   private static final int NUM_DIMENSIONS = 14;
   private static final int PQ_M = 7;
   private static final int PQ_SUB_D = 2;
   private static final int PQ_CODEBOOK_SIZE = 256;
-  private static final int NUM_PROBE_CLUSTERS = 64;
-  private static final int NUM_PROBE_GRAY = 32;
+  private static final int NUM_PROBE_CLUSTERS = 24;
+  private static final int NUM_PROBE_GRAY = 8;
   private static final int NUM_NEIGHBORS = 5;
 
   private static final ValueLayout.OfInt INT_LE = ValueLayout.JAVA_INT.withOrder(ByteOrder.LITTLE_ENDIAN);
@@ -224,7 +224,7 @@ public class InvertedFileIndex {
       for (int c = 0; c < PQ_CODEBOOK_SIZE; c++) {
         final float d0 = q0 - cb[c * 2];
         final float d1 = q1 - cb[c * 2 + 1];
-        row[c] = Math.fma(d0, d0, d1 * d1);
+        row[c] = d0 * d0 + d1 * d1;
       }
     }
   }
