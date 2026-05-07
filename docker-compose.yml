@@ -17,13 +17,9 @@ services:
 
   api1: &api
     image: ${API_IMAGE:-vigilant:latest}
-    build:
-      context: .
-      dockerfile: Dockerfile
+    build: .
     environment:
       INDEX_PATH: /app/data/index.bin
-    volumes:
-      - ./data/index.bin:/app/data/index.bin:ro
     deploy:
       resources:
         limits:
