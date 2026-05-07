@@ -59,7 +59,6 @@ public final class OfflineIndexBuilder {
     final float[][] ivfCentroids = initializeKMeansPlusPlus(
       vectors,
       NUM_CLUSTERS,
-      TRAINING_SAMPLE_SIZE,
       RANDOM_SEED
     );
 
@@ -234,46 +233,37 @@ public final class OfflineIndexBuilder {
   private static float[][] initializeKMeansPlusPlus(
     final float[][] vectors,
     final int numClusters,
-    final int sampleSize,
     final long seed
   ) {
     final int numVectors = vectors.length;
-    final int effectiveSampleSize = Math.min(numVectors, sampleSize);
-    final int[] sampleIndices = new int[effectiveSampleSize];
-    final long[] randomState = {seed};
-    for (int i = 0; i < effectiveSampleSize; i++) {
-      randomState[0] = randomState[0] * 6364136223846793005L + 1442695040888963407L;
-      sampleIndices[i] = (int) ((randomState[0] >>> 33) % numVectors);
+    final java.util.Random rng = new java.util.Random(seed);
+    final float[][] centroids = new float[numClusters][NUM_DIMENSIONS];
+    final float[] distances = new float[numVectors];
+
+    int first = rng.nextInt(numVectors);
+    System.arraycopy(vectors[first], 0, centroids[0], 0, NUM_DIMENSIONS);
+    for (int i = 0; i < numVectors; i++) {
+      distances[i] = computeSquaredEuclideanDistance(vectors[i], centroids[0]);
     }
 
-    final float[][] centroids = new float[numClusters][NUM_DIMENSIONS];
-    final double[] minDistances = new double[effectiveSampleSize];
-    Arrays.fill(minDistances, Double.POSITIVE_INFINITY);
-
-    centroids[0] = vectors[sampleIndices[0]].clone();
-
-    for (int clusterIndex = 1; clusterIndex < numClusters; clusterIndex++) {
-      final float[] lastCentroid = centroids[clusterIndex - 1];
-      double totalDistance = 0;
-      for (int i = 0; i < effectiveSampleSize; i++) {
-        final double distance = computeSquaredEuclideanDistance(vectors[sampleIndices[i]], lastCentroid);
-        if (distance < minDistances[i]) {
-          minDistances[i] = distance;
-        }
-        totalDistance += minDistances[i];
-      }
-      randomState[0] = randomState[0] * 6364136223846793005L + 1442695040888963407L;
-      final double randomValue = ((randomState[0] >>> 11) / (double) (1L << 53)) * totalDistance;
-      double cumulativeDistance = 0;
-      int chosenIndex = effectiveSampleSize - 1;
-      for (int i = 0; i < effectiveSampleSize; i++) {
-        cumulativeDistance += minDistances[i];
-        if (cumulativeDistance >= randomValue) {
-          chosenIndex = i;
+    for (int k = 1; k < numClusters; k++) {
+      double total = 0;
+      for (float d : distances) total += d;
+      double threshold = rng.nextDouble() * total;
+      double cumulative = 0;
+      int chosen = numVectors - 1;
+      for (int i = 0; i < numVectors; i++) {
+        cumulative += distances[i];
+        if (cumulative >= threshold) {
+          chosen = i;
           break;
         }
       }
-      centroids[clusterIndex] = vectors[sampleIndices[chosenIndex]].clone();
+      System.arraycopy(vectors[chosen], 0, centroids[k], 0, NUM_DIMENSIONS);
+      for (int i = 0; i < numVectors; i++) {
+        float d = computeSquaredEuclideanDistance(vectors[i], centroids[k]);
+        if (d < distances[i]) distances[i] = d;
+      }
     }
     return centroids;
   }
@@ -307,39 +297,21 @@ public final class OfflineIndexBuilder {
         System.out.println("  converged at " + iteration);
         break;
       }
-      final double[][] centroidSums = new double[numClusters][NUM_DIMENSIONS];
-      final int[] clusterCounts = new int[numClusters];
-
-      final int processors = Runtime.getRuntime().availableProcessors();
-      final int chunkSize = (numVectors + processors - 1) / processors;
-      IntStream.range(0, processors).parallel().forEach(thread -> {
-        final int start = thread * chunkSize;
-        final int end = Math.min(start + chunkSize, numVectors);
-        final double[][] localSums = new double[numClusters][NUM_DIMENSIONS];
-        final int[] localCounts = new int[numClusters];
-        for (int i = start; i < end; i++) {
-          final int cluster = assignments[i];
-          localCounts[cluster]++;
-          for (int d = 0; d < NUM_DIMENSIONS; d++) {
-            localSums[cluster][d] += vectors[i][d];
-          }
-        }
-        synchronized (centroidSums) {
-          for (int c = 0; c < numClusters; c++) {
-            if (localCounts[c] > 0) {
-              clusterCounts[c] += localCounts[c];
-              for (int d = 0; d < NUM_DIMENSIONS; d++) {
-                centroidSums[c][d] += localSums[c][d];
-              }
-            }
-          }
-        }
-      });
+      final float[][] acc = new float[numClusters][NUM_DIMENSIONS];
+      final int[] counts = new int[numClusters];
+      for (int i = 0; i < numVectors; i++) {
+        int c = assignments[i];
+        counts[c]++;
+        float[] v = vectors[i];
+        float[] a = acc[c];
+        for (int d = 0; d < NUM_DIMENSIONS; d++) a[d] += v[d];
+      }
       for (int c = 0; c < numClusters; c++) {
-        if (clusterCounts[c] > 0) {
-          for (int d = 0; d < NUM_DIMENSIONS; d++) {
-            centroids[c][d] = (float) (centroidSums[c][d] / clusterCounts[c]);
-          }
+        if (counts[c] > 0) {
+          float inv = 1f / counts[c];
+          float[] a = acc[c];
+          float[] cen = centroids[c];
+          for (int d = 0; d < NUM_DIMENSIONS; d++) cen[d] = a[d] * inv;
         }
       }
       System.out.println("  iter " + (iteration + 1) + ": " + changeCount.get() + " changed");
