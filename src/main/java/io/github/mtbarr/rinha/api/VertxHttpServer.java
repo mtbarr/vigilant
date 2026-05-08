@@ -59,21 +59,20 @@ public final class VertxHttpServer {
       .requestHandler(httpRequest -> {
         final String path = httpRequest.path();
 
-        // Hot path primeiro — /fraud-score é chamado ordens de grandeza mais que /ready
         if (PATH_FRAUD_SCORE.equals(path)) {
           if (httpRequest.method() != HttpMethod.POST) {
             httpRequest.response().setStatusCode(405).end();
             return;
           }
-          // Roda direto no event loop — sem executeBlocking, sem context switch por request
           httpRequest.bodyHandler(requestBody -> {
             final HttpServerResponse response = httpRequest.response();
             response.putHeader("Content-Type", CONTENT_TYPE_JSON);
-            try {
-              response.end(buildFraudScoreResponse(requestBody.getBytes()));
-            } catch (final Exception unexpectedError) {
-              response.end(FRAUD_SCORE_RESPONSES[0]);
-            }
+            final byte[] payload = requestBody.getBytes();
+            vertxEngine.executeBlocking(
+              () -> buildFraudScoreResponse(payload),
+              false
+            ).onSuccess(response::end)
+             .onFailure(err -> response.end(FRAUD_SCORE_RESPONSES[0]));
           });
           return;
         }
@@ -92,16 +91,11 @@ public final class VertxHttpServer {
 
   private String buildFraudScoreResponse(final byte[] requestPayload) {
     final float[] featureVector = requestFeatureExtractor.extractFeatureVector(requestPayload);
-    final long t0 = System.nanoTime();
     final int fraudVoteCount = fraudVectorIndex.searchNearestNeighbors(
       featureVector,
       neighborIdBuffer.get(),
       neighborDistanceBuffer.get()
     );
-    final long searchNs = System.nanoTime() - t0;
-    if (searchNs > 2_000_000) { // loga só os lentos (> 2ms)
-      System.out.println("SLOW search: " + searchNs / 1_000 + "µs");
-    }
     return FRAUD_SCORE_RESPONSES[fraudVoteCount];
   }
 }
