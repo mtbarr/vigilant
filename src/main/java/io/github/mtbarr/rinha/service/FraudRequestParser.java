@@ -1,6 +1,7 @@
 package io.github.mtbarr.rinha.service;
 
 import jakarta.inject.Singleton;
+import java.nio.charset.StandardCharsets;
 
 @Singleton
 public final class FraudRequestParser {
@@ -17,197 +18,326 @@ public final class FraudRequestParser {
 
   private static final int[] DAY_OF_WEEK_MONTH_TABLE = {0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4};
 
+  private static final byte[] K_TRANSACTION = "\"transaction\"".getBytes(StandardCharsets.US_ASCII);
+  private static final byte[] K_CUSTOMER = "\"customer\"".getBytes(StandardCharsets.US_ASCII);
+  private static final byte[] K_MERCHANT = "\"merchant\"".getBytes(StandardCharsets.US_ASCII);
+  private static final byte[] K_TERMINAL = "\"terminal\"".getBytes(StandardCharsets.US_ASCII);
+  private static final byte[] K_AMOUNT = "\"amount\"".getBytes(StandardCharsets.US_ASCII);
+  private static final byte[] K_INSTALLMENTS = "\"installments\"".getBytes(StandardCharsets.US_ASCII);
+  private static final byte[] K_REQUESTED_AT = "\"requested_at\"".getBytes(StandardCharsets.US_ASCII);
+  private static final byte[] K_AVG_AMOUNT = "\"avg_amount\"".getBytes(StandardCharsets.US_ASCII);
+  private static final byte[] K_TX_COUNT_24H = "\"tx_count_24h\"".getBytes(StandardCharsets.US_ASCII);
+  private static final byte[] K_ID = "\"id\"".getBytes(StandardCharsets.US_ASCII);
+  private static final byte[] K_MCC = "\"mcc\"".getBytes(StandardCharsets.US_ASCII);
+  private static final byte[] K_IS_ONLINE = "\"is_online\"".getBytes(StandardCharsets.US_ASCII);
+  private static final byte[] K_CARD_PRESENT = "\"card_present\"".getBytes(StandardCharsets.US_ASCII);
+  private static final byte[] K_KM_FROM_HOME = "\"km_from_home\"".getBytes(StandardCharsets.US_ASCII);
+  private static final byte[] K_LAST_TRANSACTION = "\"last_transaction\"".getBytes(StandardCharsets.US_ASCII);
+  private static final byte[] K_TIMESTAMP = "\"timestamp\"".getBytes(StandardCharsets.US_ASCII);
+  private static final byte[] K_KM_FROM_CURRENT = "\"km_from_current\"".getBytes(StandardCharsets.US_ASCII);
+  private static final byte[] K_KNOWN_MERCHANTS = "\"known_merchants\"".getBytes(StandardCharsets.US_ASCII);
+
   private final ThreadLocal<float[]> featureVectorBuffer = ThreadLocal.withInitial(
     () -> new float[FEATURE_VECTOR_DIMENSIONS]
   );
 
-  public float[] extractFeatureVector(final byte[] jsonPayload) {
-    final String j = new String(jsonPayload, java.nio.charset.StandardCharsets.UTF_8);
-    return extractFeatureVector(j);
-  }
+  public float[] extractFeatureVector(final byte[] j) {
+    final float[] fv = featureVectorBuffer.get();
 
-  public float[] extractFeatureVector(final String j) {
-    final float[] featureVector = featureVectorBuffer.get();
+    final int tx = sectionStart(j, 0, K_TRANSACTION);
+    final float txAmt = extractFloat(j, tx, K_AMOUNT);
+    final int txInst = (int) extractFloat(j, tx, K_INSTALLMENTS);
+    final int tsIdx = keyPos(j, tx, K_REQUESTED_AT) + K_REQUESTED_AT.length;
+    final int tsColon = colonPos(j, tsIdx);
+    final int tsEnd = valueEndStr(j, tsColon + 1);
+    final int txHour = digits(j, tsColon + 2, 2);
+    final int txDow = tsDayOfWeek(j, tsColon + 2);
+    final long txEpoch = tsEpochSeconds(j, tsColon + 2);
 
-    int txStart = sectionStart(j, 0, "transaction");
-    float txAmount = extractFloat(j, txStart, "amount");
-    int txInstallments = extractInt(j, txStart, "installments");
-    String reqAtStr = extractStr(j, txStart, "requested_at");
-    int txHour = tsHour(reqAtStr);
-    int txDow = tsDayOfWeek(reqAtStr);
-    long txEpoch = tsEpochSeconds(reqAtStr);
+    final int cust = sectionStart(j, 0, K_CUSTOMER);
+    final float custAvg = extractFloat(j, cust, K_AVG_AMOUNT);
+    final int custTxN = (int) extractFloat(j, cust, K_TX_COUNT_24H);
 
-    int custStart = sectionStart(j, 0, "customer");
-    float custAvgAmount = extractFloat(j, custStart, "avg_amount");
-    int custTxCount = extractInt(j, custStart, "tx_count_24h");
+    final int merch = sectionStart(j, 0, K_MERCHANT);
+    final int merchIdStart = strStart(j, merch, K_ID) + 1;
+    final int merchIdEnd = strEnd(j, merch, K_ID);
+    final int mcc = extractIntStr(j, merch, K_MCC);
+    final float merchAvg = extractFloat(j, merch, K_AVG_AMOUNT);
 
-    int merchStart = sectionStart(j, 0, "merchant");
-    String merchId = extractStr(j, merchStart, "id");
-    int mccCode = extractIntStr(j, merchStart, "mcc");
-    float merchAvg = extractFloat(j, merchStart, "avg_amount");
+    final int term = sectionStart(j, 0, K_TERMINAL);
+    final boolean isOnline = extractBool(j, term, K_IS_ONLINE);
+    final boolean cardPresent = extractBool(j, term, K_CARD_PRESENT);
+    final float kmHome = extractFloat(j, term, K_KM_FROM_HOME);
 
-    boolean unknownMerchant = !merchantIsKnown(j, custStart, "known_merchants", merchId);
-
-    int termStart = sectionStart(j, 0, "terminal");
-    boolean isOnline = extractBool(j, termStart, "is_online");
-    boolean cardPresent = extractBool(j, termStart, "card_present");
-    float kmFromHome = extractFloat(j, termStart, "km_from_home");
-
-    long minutesSinceLastTx = -1L;
-    float distanceFromCurrentKm = -1f;
-
-    int ltIdx = j.indexOf("\"last_transaction\"");
+    final int ltIdx = byteIndexOf(j, 0, K_LAST_TRANSACTION);
+    long minsSinceLast = -1L;
+    float kmFromCurrent = -1f;
     if (ltIdx >= 0) {
-      int colon = j.indexOf(':', ltIdx) + 1;
-      while (j.charAt(colon) == ' ' || j.charAt(colon) == '\n' || j.charAt(colon) == '\r') colon++;
-      if (j.charAt(colon) == '{') {
-        long lastEpoch = tsEpochSeconds(extractStr(j, colon, "timestamp"));
-        distanceFromCurrentKm = extractFloat(j, colon, "km_from_current");
-        minutesSinceLastTx = Math.max(0L, txEpoch - lastEpoch) / 60L;
+      final int colon = colonPos(j, ltIdx + K_LAST_TRANSACTION.length);
+      final int brace = skipWs(j, colon + 1);
+      if (j[brace] == '{') {
+        final long lastEpoch = tsEpochSeconds(j, strStart(j, brace, K_TIMESTAMP) + K_TIMESTAMP.length);
+        kmFromCurrent = extractFloat(j, brace, K_KM_FROM_CURRENT);
+        minsSinceLast = Math.max(0L, txEpoch - lastEpoch) / 60L;
       }
     }
 
-    featureVector[0] = clampToUnitRange(txAmount / MAX_TRANSACTION_AMOUNT);
-    featureVector[1] = clampToUnitRange(txInstallments / MAX_INSTALLMENT_COUNT);
-    featureVector[2] = clampToUnitRange((txAmount / custAvgAmount) / AMOUNT_TO_AVG_RATIO_CAP);
-    featureVector[3] = txHour / 23f;
-    featureVector[4] = txDow / 6f;
+    fv[0] = clamp(txAmt / MAX_TRANSACTION_AMOUNT);
+    fv[1] = clamp(txInst / MAX_INSTALLMENT_COUNT);
+    fv[2] = custAvg > 0f ? clamp((txAmt / custAvg) / AMOUNT_TO_AVG_RATIO_CAP) : 0f;
+    fv[3] = txHour / 23f;
+    fv[4] = (txDow - 1) / 6f;
 
-    if (ltIdx >= 0 && minutesSinceLastTx >= 0) {
-      featureVector[5] = clampToUnitRange(minutesSinceLastTx / MAX_MINUTES_SINCE_LAST_TX);
-      featureVector[6] = clampToUnitRange(distanceFromCurrentKm / MAX_DISTANCE_KM);
+    if (ltIdx >= 0 && minsSinceLast >= 0) {
+      fv[5] = clamp(minsSinceLast / MAX_MINUTES_SINCE_LAST_TX);
+      fv[6] = clamp(kmFromCurrent / MAX_DISTANCE_KM);
     } else {
-      featureVector[5] = -1f;
-      featureVector[6] = -1f;
+      fv[5] = -1f;
+      fv[6] = -1f;
     }
 
-    featureVector[7] = clampToUnitRange(kmFromHome / MAX_DISTANCE_KM);
-    featureVector[8] = clampToUnitRange(custTxCount / MAX_TRANSACTIONS_24H);
-    featureVector[9] = isOnline ? 1f : 0f;
-    featureVector[10] = cardPresent ? 1f : 0f;
-    featureVector[11] = unknownMerchant ? 1f : 0f;
-    featureVector[12] = computeMccRiskScore(mccCode);
-    featureVector[13] = clampToUnitRange(merchAvg / MAX_MERCHANT_AVG_AMOUNT);
+    fv[7] = clamp(kmHome / MAX_DISTANCE_KM);
+    fv[8] = clamp(custTxN / MAX_TRANSACTIONS_24H);
+    fv[9] = isOnline ? 1f : 0f;
+    fv[10] = cardPresent ? 1f : 0f;
+    fv[11] = merchantIsKnown(j, cust, K_KNOWN_MERCHANTS, merchIdStart, merchIdEnd) ? 0f : 1f;
+    fv[12] = mccRisk(mcc);
+    fv[13] = clamp(merchAvg / MAX_MERCHANT_AVG_AMOUNT);
 
-    return featureVector;
+    return fv;
   }
 
-  private static int sectionStart(String j, int from, String key) {
-    int k = j.indexOf('"' + key + '"', from);
-    int colon = j.indexOf(':', k);
-    return j.indexOf('{', colon);
+  private static int keyPos(final byte[] j, final int from, final byte[] key) {
+    return byteIndexOf(j, from, key);
   }
 
-  private static String extractStr(String j, int from, String key) {
-    int k = j.indexOf('"' + key + '"', from);
-    int colon = j.indexOf(':', k);
-    int q1 = j.indexOf('"', colon + 1);
-    int q2 = j.indexOf('"', q1 + 1);
-    return j.substring(q1 + 1, q2);
+  private static int colonPos(final byte[] j, final int from) {
+    int i = from;
+    while (j[i] != ':') {
+      i++;
+    }
+    return i;
   }
 
-  private static float extractFloat(String j, int from, String key) {
-    int k = j.indexOf('"' + key + '"', from);
-    int start = j.indexOf(':', k) + 1;
-    while (j.charAt(start) == ' ') start++;
+  private static int skipWs(final byte[] j, int pos) {
+    byte c;
+    while ((c = j[pos]) == ' ' || c == '\n' || c == '\r') {
+      pos++;
+    }
+    return pos;
+  }
+
+  private static int sectionStart(final byte[] j, final int from, final byte[] key) {
+    final int k = byteIndexOf(j, from, key);
+    if (k < 0) {
+      return -1;
+    }
+    final int colon = colonPos(j, k + key.length);
+    return skipWs(j, colon + 1);
+  }
+
+  private static int valueEndStr(final byte[] j, int pos) {
+    pos = skipWs(j, pos);
+    if (j[pos] != '"') {
+      return pos;
+    }
+    int i = pos + 1;
+    while (i < j.length && j[i] != '"') {
+      i++;
+    }
+    return i;
+  }
+
+  private static int strStart(final byte[] j, final int from, final byte[] key) {
+    final int k = byteIndexOf(j, from, key);
+    if (k < 0) {
+      return -1;
+    }
+    int pos = skipWs(j, colonPos(j, k + key.length) + 1);
+    return j[pos] == '"' ? pos : pos - 1;
+  }
+
+  private static int strEnd(final byte[] j, final int from, final byte[] key) {
+    final int k = byteIndexOf(j, from, key);
+    if (k < 0) {
+      return -1;
+    }
+    final int colon = colonPos(j, k + key.length);
+    return valueEndStr(j, colon + 1);
+  }
+
+  private static float extractFloat(final byte[] j, int from, final byte[] key) {
+    final int k = byteIndexOf(j, from, key);
+    if (k < 0) {
+      return 0f;
+    }
+    int start = skipWs(j, colonPos(j, k + key.length) + 1);
     int end = start;
-    char c;
-    while (end < j.length() && (c = j.charAt(end)) != ',' && c != '}' && c != '\n' && c != '\r') end++;
-    return Float.parseFloat(j.substring(start, end).trim());
+    byte c;
+    while (end < j.length && (c = j[end]) != ',' && c != '}' && c != '\n' && c != '\r') {
+      end++;
+    }
+    return parseFloat(j, start, end);
   }
 
-  private static int extractInt(String j, int from, String key) {
-    return (int) extractFloat(j, from, key);
-  }
-
-  private static int extractIntStr(String j, int from, String key) {
-    int k = j.indexOf('"' + key + '"', from);
-    int q1 = j.indexOf('"', j.indexOf(':', k) + 1) + 1;
+  private static int extractIntStr(final byte[] j, int from, final byte[] key) {
+    final int k = byteIndexOf(j, from, key);
+    if (k < 0) {
+      return 0;
+    }
+    int q1 = skipWs(j, colonPos(j, k + key.length) + 1);
+    if (j[q1] == '"') {
+      q1++;
+    }
     int v = 0;
-    char c;
-    while ((c = j.charAt(q1++)) != '"') v = v * 10 + (c - '0');
+    while (q1 < j.length && j[q1] != '"') {
+      v = v * 10 + (j[q1] - '0');
+      q1++;
+    }
     return v;
   }
 
-  private static boolean extractBool(String j, int from, String key) {
-    int k = j.indexOf('"' + key + '"', from);
-    int start = j.indexOf(':', k) + 1;
-    while (j.charAt(start) == ' ') start++;
-    return j.charAt(start) == 't';
+  private static boolean extractBool(final byte[] j, int from, final byte[] key) {
+    final int k = byteIndexOf(j, from, key);
+    if (k < 0) {
+      return false;
+    }
+    return j[skipWs(j, colonPos(j, k + key.length) + 1)] == 't';
   }
 
-  private static boolean merchantIsKnown(String j, int from, String key, String targetId) {
-    int k = j.indexOf('"' + key + '"', from);
-    if (k < 0) return false;
-    int bracket = j.indexOf('[', k);
-    int end = j.indexOf(']', bracket);
+  private static boolean merchantIsKnown(final byte[] j, int from, final byte[] key, final int idStart, final int idEnd) {
+    final int k = byteIndexOf(j, from, key);
+    if (k < 0) {
+      return false;
+    }
+    final int bracket = byteIndexOf(j, k + key.length, new byte[]{'['});
+    if (bracket < 0) {
+      return false;
+    }
+    final int close = byteIndexOf(j, bracket + 1, new byte[]{']'});
+    final int idLen = idEnd - idStart;
     int pos = bracket + 1;
-    int tLen = targetId.length();
-    while (pos < end) {
-      int q1 = j.indexOf('"', pos);
-      if (q1 < 0 || q1 >= end) break;
-      int q2 = j.indexOf('"', q1 + 1);
-      if (q2 - q1 - 1 == tLen && j.regionMatches(q1 + 1, targetId, 0, tLen)) return true;
+    while (pos < close) {
+      int q1 = byteIndexOf(j, pos, new byte[]{'"'});
+      if (q1 < 0 || q1 >= close) {
+        break;
+      }
+      int q2 = byteIndexOf(j, q1 + 1, new byte[]{'"'});
+      if (q2 - q1 - 1 == idLen && bytesEqual(j, q1 + 1, j, idStart, idLen)) {
+        return true;
+      }
       pos = q2 + 1;
     }
     return false;
   }
 
-  private static int tsHour(String s) {
-    return (s.charAt(11) - '0') * 10 + (s.charAt(12) - '0');
+  private static int tsDayOfWeek(final byte[] j, final int tsStart) {
+    final int y = digits(j, tsStart, 4);
+    final int m = digits(j, tsStart + 5, 2);
+    final int d = digits(j, tsStart + 8, 2);
+    final int adjY = m < 3 ? y - 1 : y;
+    final int adjM = m < 3 ? m + 9 : m - 3;
+    final int era = adjY >= 0 ? adjY / 400 : (adjY - 399) / 400;
+    final int yoe = adjY - era * 400;
+    final int doy = (153 * adjM + 2) / 5 + d - 1;
+    final int doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    final int days = era * 146097 + doe - 719468;
+    int dow = days % 7;
+    if (dow <= 0) {
+      dow += 7;
+    }
+    return dow;
   }
 
-  private static int tsDayOfWeek(String s) {
-    int y = digits(s, 0, 4);
-    int m = digits(s, 5, 7);
-    int d = digits(s, 8, 10);
-    if (m < 3) y--;
-    int dow = (y + y / 4 - y / 100 + y / 400 + DAY_OF_WEEK_MONTH_TABLE[m - 1] + d) % 7;
-    return dow == 0 ? 7 : dow;
-  }
-
-  private static long tsEpochSeconds(String s) {
-    int y = digits(s, 0, 4);
-    int m = digits(s, 5, 7);
-    int d = digits(s, 8, 10);
-    int h = digits(s, 11, 13);
-    int min = digits(s, 14, 16);
-    int sec = digits(s, 17, 19);
-    if (m <= 2) { y--; m += 9; } else { m -= 3; }
-    long era = (y >= 0 ? y : y - 399) / 400;
-    int yoe = (int)(y - era * 400);
-    int doy = (153 * m + 2) / 5 + d - 1;
-    int doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    long days = era * 146097L + doe - 719468L;
+  private static long tsEpochSeconds(final byte[] j, final int tsStart) {
+    final int y = digits(j, tsStart, 4);
+    final int mo = digits(j, tsStart + 5, 2);
+    final int d = digits(j, tsStart + 8, 2);
+    final int h = digits(j, tsStart + 11, 2);
+    final int min = digits(j, tsStart + 14, 2);
+    final int sec = digits(j, tsStart + 17, 2);
+    int m = mo;
+    int yr = y;
+    if (m <= 2) {
+      yr--;
+      m += 9;
+    } else {
+      m -= 3;
+    }
+    final long era = (yr >= 0 ? yr : yr - 399) / 400;
+    final int yoe = (int) (yr - era * 400);
+    final int doy = (153 * m + 2) / 5 + d - 1;
+    final int doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    final long days = era * 146097L + doe - 719468L;
     return days * 86400L + h * 3600L + min * 60L + sec;
   }
 
-  private static int digits(String s, int start, int end) {
+  private static int digits(final byte[] j, int start, final int count) {
     int v = 0;
-    for (int i = start; i < end; i++) v = v * 10 + (s.charAt(i) - '0');
+    final int end = start + count;
+    for (int i = start; i < end; i++) {
+      v = v * 10 + (j[i] - '0');
+    }
     return v;
   }
 
-  public static float dayOfWeek(final int year, final int month, final int day) {
-    int adjustedYear = year;
-    if (month < 3) {
-      adjustedYear--;
+  private static float parseFloat(final byte[] j, int start, final int end) {
+    float result = 0f;
+    boolean neg = false;
+    if (start < end && j[start] == '-') {
+      neg = true;
+      start++;
     }
-    final int rawDayOfWeek = (adjustedYear
-      + adjustedYear / 4
-      - adjustedYear / 100
-      + adjustedYear / 400
-      + DAY_OF_WEEK_MONTH_TABLE[month - 1]
-      + day) % 7;
-    return (rawDayOfWeek + 6) % 7;
+    while (start < end && j[start] >= '0' && j[start] <= '9') {
+      result = result * 10f + (j[start] - '0');
+      start++;
+    }
+    if (start < end && j[start] == '.') {
+      start++;
+      float frac = 0f;
+      float div = 1f;
+      while (start < end && j[start] >= '0' && j[start] <= '9') {
+        frac = frac * 10f + (j[start] - '0');
+        div *= 10f;
+        start++;
+      }
+      result += frac / div;
+    }
+    return neg ? -result : result;
   }
 
-  private static float clampToUnitRange(float value) {
-    return value < 0f ? 0f : (value > 1f ? 1f : value);
+  private static int byteIndexOf(final byte[] data, int from, final byte[] pattern) {
+    final int limit = data.length - pattern.length;
+    for (int i = from; i <= limit; i++) {
+      boolean match = true;
+      for (int j = 0; j < pattern.length; j++) {
+        if (data[i + j] != pattern[j]) {
+          match = false;
+          break;
+        }
+      }
+      if (match) {
+        return i;
+      }
+    }
+    return -1;
   }
 
-  private static float computeMccRiskScore(int merchantCategoryCode) {
-    return switch (merchantCategoryCode) {
+  private static boolean bytesEqual(final byte[] a, final int aOff, final byte[] b, final int bOff, final int len) {
+    for (int i = 0; i < len; i++) {
+      if (a[aOff + i] != b[bOff + i]) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private static float clamp(final float v) {
+    return v < 0f ? 0f : (v > 1f ? 1f : v);
+  }
+
+  private static float mccRisk(final int mcc) {
+    return switch (mcc) {
       case 5411 -> 0.15f;
       case 5812 -> 0.30f;
       case 5912 -> 0.20f;

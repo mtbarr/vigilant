@@ -15,14 +15,15 @@ import java.util.Arrays;
 @Singleton
 public class InvertedFileIndex {
 
-  private static final int NUM_CLUSTERS = 1024;
+  private static final int NUM_CLUSTERS = 512;
   private static final int NUM_DIMENSIONS = 14;
-  private static final int PQ_M = 7;
-  private static final int PQ_SUB_D = 2;
+  private static final int PQ_M = 14;
+  private static final int PQ_SUB_D = 1;
   private static final int PQ_CODEBOOK_SIZE = 256;
-  private static final int NUM_PROBE_CLUSTERS = 24;
+  private static final int NUM_PROBE_CLUSTERS = 12;
   private static final int NUM_PROBE_GRAY = 8;
-  private static final int NUM_NEIGHBORS = 5;
+  private static final int NUM_NEIGHBORS = 10;
+  private static final int RERANK_TOP = 5;
 
   private static final ValueLayout.OfInt INT_LE = ValueLayout.JAVA_INT.withOrder(ByteOrder.LITTLE_ENDIAN);
   private static final ValueLayout.OfLong LONG_LE = ValueLayout.JAVA_LONG.withOrder(ByteOrder.LITTLE_ENDIAN);
@@ -31,9 +32,12 @@ public class InvertedFileIndex {
   private float[] ivfCentroidsFlat;
   private float[][] pqCodebooksFlat;
   private byte[] fraudLabels;
-  private int[][] idsByCluster;
-  private byte[][] codesByCluster;
+  private int[] flatIds;
+  private byte[] flatCodes;
+  private int[] clusterOffsets;
   private volatile boolean isIndexReady = false;
+  private MemorySegment indexSegment;
+  private long vectorsOffset;
 
   private final ThreadLocal<float[]> centroidDistanceBuffer = ThreadLocal.withInitial(
     () -> new float[NUM_CLUSTERS]
@@ -50,6 +54,7 @@ public class InvertedFileIndex {
     final String indexPath = System.getenv().getOrDefault("INDEX_PATH", "/data/index.bin");
     try {
       loadIndexFromFile(indexPath);
+      warmup();
       isIndexReady = true;
     } catch (final Exception exception) {
       System.err.println("Index not loaded: " + exception.getMessage());
@@ -78,6 +83,7 @@ public class InvertedFileIndex {
         throw new IOException("Expected K=" + NUM_CLUSTERS + " got " + storedClusters);
       }
       final int totalVectorCount = indexSegment.get(INT_LE, 12);
+      this.vectorsOffset = indexSegment.get(LONG_LE, 16);
       final long labelsOffset = indexSegment.get(LONG_LE, 24);
 
       final long centroidsOffset = 36L;
@@ -105,28 +111,38 @@ public class InvertedFileIndex {
       final MemorySegment labelsSegment = indexSegment.asSlice(labelsOffset, totalVectorCount);
       labelsSegment.asByteBuffer().get(fraudLabels);
 
-      // --- Copy inverted lists to heap: IDs (int[]) and PQ codes (byte[]) per cluster ---
+      // --- Copy inverted lists to flat arrays ---
       final long invertedListsOffset = labelsOffset + totalVectorCount;
-      idsByCluster = new int[NUM_CLUSTERS][];
-      codesByCluster = new byte[NUM_CLUSTERS][];
-      long offset = invertedListsOffset;
+      final int[] clusterSizes = new int[NUM_CLUSTERS];
+      final long[] listPositions = new long[NUM_CLUSTERS];
+      clusterOffsets = new int[NUM_CLUSTERS + 1];
+      int totalVectorSize = 0;
+      long pos = invertedListsOffset;
       for (int c = 0; c < NUM_CLUSTERS; c++) {
-        final int size = indexSegment.get(INT_LE, offset);
-        final long idsOffset = offset + 4L;
-        final long codesOffset = idsOffset + (long) size * 4L;
-        final int[] ids = new int[size];
-        final byte[] codes = new byte[size * PQ_M];
+        final int size = indexSegment.get(INT_LE, pos);
+        clusterSizes[c] = size;
+        clusterOffsets[c] = totalVectorSize;
+        totalVectorSize += size;
+        listPositions[c] = pos;
+        final long dataSize = 4L + (long) size * 4L + (long) size * PQ_M;
+        pos += (dataSize + 3L) & ~3L;
+      }
+      clusterOffsets[NUM_CLUSTERS] = totalVectorSize;
 
+      flatIds = new int[totalVectorSize];
+      flatCodes = new byte[totalVectorSize * PQ_M];
+      for (int c = 0; c < NUM_CLUSTERS; c++) {
+        final int size = clusterSizes[c];
+        final long idsOffset = listPositions[c] + 4L;
+        final long codesOffset = idsOffset + (long) size * 4L;
+        final int destOff = clusterOffsets[c];
         final MemorySegment idsSegment = indexSegment.asSlice(idsOffset, (long) size * 4L);
         final MemorySegment codesSegment2 = indexSegment.asSlice(codesOffset, (long) size * PQ_M);
-        idsSegment.asByteBuffer().order(ByteOrder.LITTLE_ENDIAN).asIntBuffer().get(ids);
-        codesSegment2.asByteBuffer().get(codes);
-
-        idsByCluster[c] = ids;
-        codesByCluster[c] = codes;
-        final long dataSize = 4L + (long) size * 4L + (long) size * PQ_M;
-        offset += (dataSize + 3L) & ~3L;
+        idsSegment.asByteBuffer().order(ByteOrder.LITTLE_ENDIAN).asIntBuffer().get(flatIds, destOff, size);
+        codesSegment2.asByteBuffer().get(flatCodes, destOff * PQ_M, size * PQ_M);
       }
+
+      this.indexSegment = indexSegment;
 
       int fraudCount = 0;
       for (byte label : fraudLabels) {
@@ -166,50 +182,69 @@ public class InvertedFileIndex {
 
     for (int probe = 0; probe < NUM_PROBE_CLUSTERS; probe++) {
       final int ci = centroidOrder[probe];
-      final int[] ids = idsByCluster[ci];
-      final byte[] codes = codesByCluster[ci];
+      final int startIdx = clusterOffsets[ci];
+      final int endIdx = clusterOffsets[ci + 1];
 
-      for (int i = 0; i < ids.length; i++) {
-        final float approx = adcDistance(adcTable, codes, i * PQ_M);
+      int codeOff = startIdx * PQ_M;
+      for (int i = startIdx; i < endIdx; i++, codeOff += PQ_M) {
+        float approx = 0f;
+        for (int m = 0; m < PQ_M; m++) {
+          approx += adcTable[m][flatCodes[codeOff + m] & 0xFF];
+        }
         if (approx < neighborDistances[NUM_NEIGHBORS - 1]) {
-          insertIntoSortedArray(neighborIds, neighborDistances, NUM_NEIGHBORS, ids[i], approx);
+          insertIntoSortedArray(neighborIds, neighborDistances, NUM_NEIGHBORS, flatIds[i], approx);
         }
       }
 
       if (probe == NUM_PROBE_GRAY - 1) {
         int fc = 0;
-        for (int k = 0; k < NUM_NEIGHBORS; k++) {
+        for (int k = 0; k < RERANK_TOP; k++) {
           if (neighborIds[k] >= 0 && fraudLabels[neighborIds[k]] == 1) {
             fc++;
           }
         }
-        if (fc <= 1 || fc >= NUM_NEIGHBORS - 1) {
+        if (fc <= 1 || fc >= RERANK_TOP - 1) {
           return fc;
         }
       }
     }
 
-    int fraudVoteCount = 0;
     for (int k = 0; k < NUM_NEIGHBORS; k++) {
-      if (neighborIds[k] >= 0 && fraudLabels[neighborIds[k]] == 1) {
+      if (neighborIds[k] >= 0) {
+        final long baseOff = vectorsOffset + (long) neighborIds[k] * NUM_DIMENSIONS * 4L;
+        float exactDist = 0f;
+        for (int d = 0; d < NUM_DIMENSIONS; d++) {
+          final float delta = queryVector[d] - indexSegment.get(FLOAT_LE, baseOff + d * 4L);
+          exactDist = Math.fma(delta, delta, exactDist);
+        }
+        neighborDistances[k] = exactDist;
+      } else {
+        neighborDistances[k] = Float.MAX_VALUE;
+      }
+    }
+
+    for (int i = 0; i < RERANK_TOP; i++) {
+      int best = i;
+      for (int j = i + 1; j < NUM_NEIGHBORS; j++) {
+        if (neighborDistances[j] < neighborDistances[best]) {
+          best = j;
+        }
+      }
+      final int tmpId = neighborIds[i];
+      neighborIds[i] = neighborIds[best];
+      neighborIds[best] = tmpId;
+      final float tmpDist = neighborDistances[i];
+      neighborDistances[i] = neighborDistances[best];
+      neighborDistances[best] = tmpDist;
+    }
+
+    int fraudVoteCount = 0;
+    for (int k = 0; k < RERANK_TOP; k++) {
+      if (fraudLabels[neighborIds[k]] == 1) {
         fraudVoteCount++;
       }
     }
     return fraudVoteCount;
-  }
-
-  private static float adcDistance(
-    final float[][] table,
-    final byte[] codes,
-    final int off
-  ) {
-    return table[0][codes[off] & 0xFF]
-           + table[1][codes[off + 1] & 0xFF]
-           + table[2][codes[off + 2] & 0xFF]
-           + table[3][codes[off + 3] & 0xFF]
-           + table[4][codes[off + 4] & 0xFF]
-           + table[5][codes[off + 5] & 0xFF]
-           + table[6][codes[off + 6] & 0xFF];
   }
 
   private void buildAdcLookupTable(
@@ -217,20 +252,27 @@ public class InvertedFileIndex {
     final float[][] lookupTable
   ) {
     for (int m = 0; m < PQ_M; m++) {
-      final float q0 = queryVector[m * PQ_SUB_D];
-      final float q1 = queryVector[m * PQ_SUB_D + 1];
+      final float q = queryVector[m];
       final float[] cb = pqCodebooksFlat[m];
       final float[] row = lookupTable[m];
       for (int c = 0; c < PQ_CODEBOOK_SIZE; c++) {
-        final float d0 = q0 - cb[c * 2];
-        final float d1 = q1 - cb[c * 2 + 1];
-        row[c] = d0 * d0 + d1 * d1;
+        final float d = q - cb[c];
+        row[c] = d * d;
       }
     }
   }
 
   public boolean isReady() {
     return isIndexReady;
+  }
+
+  private void warmup() {
+    final float[] q = new float[NUM_DIMENSIONS];
+    final int[] ids = new int[NUM_NEIGHBORS];
+    final float[] dists = new float[NUM_NEIGHBORS];
+    for (int i = 0; i < 3; i++) {
+      searchNearestNeighbors(q, ids, dists);
+    }
   }
 
   private static void insertIntoSortedArray(
