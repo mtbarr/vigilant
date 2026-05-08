@@ -22,7 +22,7 @@ public class InvertedFileIndex {
   private static final int PQ_CODEBOOK_SIZE = 256;
   private static final int NUM_PROBE_CLUSTERS = 12;
   private static final int NUM_PROBE_GRAY = 8;
-  private static final int NUM_NEIGHBORS = 10;
+  private static final int NUM_NEIGHBORS = 30;
   private static final int RERANK_TOP = 5;
 
   private static final ValueLayout.OfInt INT_LE = ValueLayout.JAVA_INT.withOrder(ByteOrder.LITTLE_ENDIAN);
