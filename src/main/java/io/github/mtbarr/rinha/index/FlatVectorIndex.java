@@ -3,12 +3,9 @@ package io.github.mtbarr.rinha.index;
 import jakarta.annotation.PostConstruct;
 import jakarta.inject.Singleton;
 import java.io.IOException;
-import java.io.RandomAccessFile;
-import java.lang.foreign.Arena;
-import java.lang.foreign.MemorySegment;
-import java.lang.foreign.ValueLayout;
+import java.io.InputStream;
+import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
-import java.nio.channels.FileChannel.MapMode;
 import java.util.Arrays;
 import jdk.incubator.vector.IntVector;
 import jdk.incubator.vector.ShortVector;
@@ -25,8 +22,6 @@ public class FlatVectorIndex {
   private static final VectorSpecies<Short> S16 = ShortVector.SPECIES_256;
   private static final VectorSpecies<Integer> S32 = IntVector.SPECIES_256;
 
-  private static final ValueLayout.OfInt INT_LE = ValueLayout.JAVA_INT.withOrder(ByteOrder.LITTLE_ENDIAN);
-
   private short[] vectors;
   private byte[] labels;
   private int count;
@@ -38,9 +33,8 @@ public class FlatVectorIndex {
 
   @PostConstruct
   void initialize() {
-    final String path = System.getenv().getOrDefault("INDEX_PATH", "/data/flat_index.bin");
     try {
-      load(path);
+      load();
       ready = true;
       System.out.println("Flat index loaded: " + count + " vectors");
     } catch (final Exception e) {
@@ -48,24 +42,22 @@ public class FlatVectorIndex {
     }
   }
 
-  private void load(final String path) throws IOException {
-    try (final var raf = new RandomAccessFile(path, "r");
-         final var ch = raf.getChannel()) {
-      final MemorySegment seg = ch.map(MapMode.READ_ONLY, 0, raf.length(), Arena.global());
-      final int magic = seg.get(INT_LE, 0);
-      if (magic != 0x464C4154) throw new IOException("Bad magic: " + Integer.toHexString(magic));
-      if (seg.get(INT_LE, 4) != 1) throw new IOException("Bad version");
-      count = seg.get(INT_LE, 8);
-      final int pd = seg.get(INT_LE, 12);
-      if (pd != PADDED) throw new IOException("Expected padded_d=" + PADDED + " got " + pd);
-      final long dataOff = 20L;
-      final long dataLen = (long) count * PADDED * 2L;
-      vectors = new short[count * PADDED];
-      final MemorySegment dataSeg = seg.asSlice(dataOff, dataLen);
-      dataSeg.asByteBuffer().order(ByteOrder.LITTLE_ENDIAN).asShortBuffer().get(vectors);
-      final long labelOff = dataOff + dataLen;
+  private void load() throws IOException {
+    try (final InputStream is = getClass().getResourceAsStream("/flat_index.bin")) {
+      if (is == null) throw new IOException("Resource /flat_index.bin not found");
+      final byte[] data = is.readAllBytes();
+      final ByteBuffer buf = ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN);
+      if (buf.getInt() != 0x464C4154) throw new IOException("Bad magic");
+      if (buf.getInt() != 1) throw new IOException("Bad version");
+      count = buf.getInt();
+      if (buf.getInt() != PADDED) throw new IOException("Bad padded_d");
+      buf.getInt(); // scale
+      final int total = count * PADDED;
+      vectors = new short[total];
+      buf.asShortBuffer().get(vectors);
+      buf.position(buf.position() + total * 2);
       labels = new byte[count];
-      seg.asSlice(labelOff, count).asByteBuffer().get(labels);
+      buf.get(labels);
     }
   }
 

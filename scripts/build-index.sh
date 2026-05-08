@@ -11,7 +11,7 @@ java -Xmx4g \
   -cp "$(./gradlew -q :printClasspath --no-daemon):build/classes/java/main" \
   io.github.mtbarr.rinha.index.OfflineIndexBuilder \
   src/main/resources/references.json.gz \
-  data/flat_index.bin
+  src/main/resources/flat_index.bin
 
-echo "=== flat_index.bin ready ==="
-ls -lh data/flat_index.bin
+echo "=== flat_index.bin ready at src/main/resources/ ==="
+ls -lh src/main/resources/flat_index.bin
