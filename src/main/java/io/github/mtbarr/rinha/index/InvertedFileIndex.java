@@ -22,7 +22,7 @@ public class InvertedFileIndex {
   private static final int PQ_CODEBOOK_SIZE = 256;
   private static final int NUM_PROBE_CLUSTERS = 12;
   private static final int NUM_PROBE_GRAY = 8;
-  private static final int NUM_NEIGHBORS = 30;
+  private static final int NUM_NEIGHBORS = 10;
   private static final int RERANK_TOP = 5;
 
   private static final ValueLayout.OfInt INT_LE = ValueLayout.JAVA_INT.withOrder(ByteOrder.LITTLE_ENDIAN);
@@ -237,20 +237,11 @@ public class InvertedFileIndex {
     final byte[] codes,
     final int off
   ) {
-    return table[0][codes[off] & 0xFF]
-           + table[1][codes[off + 1] & 0xFF]
-           + table[2][codes[off + 2] & 0xFF]
-           + table[3][codes[off + 3] & 0xFF]
-           + table[4][codes[off + 4] & 0xFF]
-           + table[5][codes[off + 5] & 0xFF]
-           + table[6][codes[off + 6] & 0xFF]
-           + table[7][codes[off + 7] & 0xFF]
-           + table[8][codes[off + 8] & 0xFF]
-           + table[9][codes[off + 9] & 0xFF]
-           + table[10][codes[off + 10] & 0xFF]
-           + table[11][codes[off + 11] & 0xFF]
-           + table[12][codes[off + 12] & 0xFF]
-           + table[13][codes[off + 13] & 0xFF];
+    float d = 0f;
+    for (int m = 0; m < PQ_M; m++) {
+      d += table[m][codes[off + m] & 0xFF];
+    }
+    return d;
   }
 
   private void buildAdcLookupTable(
