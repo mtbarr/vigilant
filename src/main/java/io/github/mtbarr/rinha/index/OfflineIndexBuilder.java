@@ -8,7 +8,6 @@ import java.nio.ByteOrder;
 import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
-import java.util.Random;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -18,13 +17,13 @@ import java.util.zip.GZIPInputStream;
 
 public final class OfflineIndexBuilder {
 
-  private static final int NUM_CLUSTERS = 2048;
+  private static final int NUM_CLUSTERS = 512;
   private static final int NUM_DIMENSIONS = 14;
   private static final int PQ_M = 7;
   private static final int PQ_SUB_D = 2;
   private static final int PQ_CODEBOOK_SIZE = 256;
-  private static final int TRAINING_SAMPLE_SIZE = 262_144;
-  private static final int IVF_MAX_ITERATIONS = 25;
+  private static final int TRAINING_SAMPLE_SIZE = Integer.MAX_VALUE;
+  private static final int IVF_MAX_ITERATIONS = 20;
   private static final int PQ_MAX_ITERATIONS = 20;
   private static final long RANDOM_SEED = 42L;
 
@@ -342,6 +341,7 @@ public final class OfflineIndexBuilder {
     });
     return codebooks;
   }
+
 
   private static float[][] runKMeansOnSubspace(
     final float[][] data,
