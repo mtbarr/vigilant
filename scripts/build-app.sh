@@ -2,9 +2,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-INDEX="data/index.bin"
+INDEX="data/flat_index.bin"
 if [ ! -f "$INDEX" ]; then
-  echo "index.bin nao encontrado. Execute primeiro: scripts/build-index.sh"
+  echo "flat_index.bin nao encontrado. Execute primeiro: scripts/build-index.sh"
   exit 1
 fi
 
