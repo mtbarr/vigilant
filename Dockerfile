@@ -16,7 +16,9 @@ RUN mkdir -p /data && java \
     -cp "$(./gradlew -q :printClasspath --no-daemon):build/classes/java/main" \
     io.github.mtbarr.rinha.index.OfflineIndexBuilder \
     src/main/resources/references.json.gz \
-    /data/flat_index.bin
+    /data/flat_index.bin && \
+    ls -lh /data/flat_index.bin && \
+    echo "=== Index OK ==="
 
 # Stage 2: Native image com GraalVM CE 25
 FROM ghcr.io/graalvm/graalvm-community:25 AS native-builder
