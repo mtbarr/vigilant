@@ -1,0 +1,7 @@
+{
+    "participants": ["Matheus Barreto"],
+    "social": ["https://github.com/mtbarr"],
+    "source-code-repo": "https://github.com/mtbarr/vigilant",
+    "stack": ["java", "quarkus", "vert.x", "graalvm", "haproxy"],
+    "open_to_work": true
+}

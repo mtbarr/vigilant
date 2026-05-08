@@ -1,0 +1,30 @@
+services:
+  haproxy:
+    image: haproxy:3.1-alpine
+    ports:
+      - 9999:9999
+    volumes:
+      - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+      - ./nsswitch.conf:/etc/nsswitch.conf:ro
+    depends_on:
+      - api1
+      - api2
+    deploy:
+      resources:
+        limits:
+          cpus: "0.10"
+          memory: "30M"
+
+  api1: &api
+    image: ${API_IMAGE:-vigilant:latest}
+    build: .
+    environment:
+      INDEX_PATH: /app/data/index.bin
+    deploy:
+      resources:
+        limits:
+          cpus: "0.45"
+          memory: "160M"
+
+  api2:
+    <<: *api
