@@ -92,11 +92,16 @@ public final class VertxHttpServer {
 
   private String buildFraudScoreResponse(final byte[] requestPayload) {
     final float[] featureVector = requestFeatureExtractor.extractFeatureVector(requestPayload);
+    final long t0 = System.nanoTime();
     final int fraudVoteCount = fraudVectorIndex.searchNearestNeighbors(
       featureVector,
       neighborIdBuffer.get(),
       neighborDistanceBuffer.get()
     );
+    final long searchNs = System.nanoTime() - t0;
+    if (searchNs > 2_000_000) { // loga só os lentos (> 2ms)
+      System.out.println("SLOW search: " + searchNs / 1_000 + "µs");
+    }
     return FRAUD_SCORE_RESPONSES[fraudVoteCount];
   }
 }
