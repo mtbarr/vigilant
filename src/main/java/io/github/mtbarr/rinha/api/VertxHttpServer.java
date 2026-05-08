@@ -1,6 +1,6 @@
 package io.github.mtbarr.rinha.api;
 
-import io.github.mtbarr.rinha.index.InvertedFileIndex;
+import io.github.mtbarr.rinha.index.FlatVectorIndex;
 import io.github.mtbarr.rinha.service.FraudRequestParser;
 import io.quarkus.runtime.StartupEvent;
 import io.vertx.core.Vertx;
@@ -14,7 +14,7 @@ import jakarta.inject.Singleton;
 @Singleton
 public final class VertxHttpServer {
 
-  private static final int NEIGHBOR_COUNT = 10;
+  private static final int NEIGHBOR_COUNT = 5;
 
   private static final String[] FRAUD_SCORE_RESPONSES = {
     "{\"approved\":true,\"fraud_score\":0.0}",
@@ -41,7 +41,7 @@ public final class VertxHttpServer {
   Vertx vertxEngine;
 
   @Inject
-  InvertedFileIndex fraudVectorIndex;
+  FlatVectorIndex fraudVectorIndex;
 
   @Inject
   FraudRequestParser requestFeatureExtractor;
