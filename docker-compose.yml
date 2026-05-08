@@ -5,6 +5,7 @@ services:
       - 9999:9999
     volumes:
       - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+      - ./nsswitch.conf:/etc/nsswitch.conf:ro
     depends_on:
       - api1
       - api2
@@ -15,17 +16,15 @@ services:
           memory: "30M"
 
   api1: &api
-    image: ${API_IMAGE:?set API_IMAGE or run docker compose build}
+    image: ${API_IMAGE:-vigilant:latest}
+    build: .
     environment:
-      INDEX_PATH: /data/index.bin
-      MCC_RISK_PATH: /data/mcc_risk.json
-    volumes:
-      - ./data:/data:ro
+      INDEX_PATH: /app/data/index.bin
     deploy:
       resources:
         limits:
           cpus: "0.45"
-          memory: "150M"
+          memory: "160M"
 
   api2:
     <<: *api

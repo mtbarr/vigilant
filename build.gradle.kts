@@ -14,7 +14,7 @@ val quarkusPlatformVersion: String by project
 
 dependencies {
     implementation(enforcedPlatform("${quarkusPlatformGroupId}:${quarkusPlatformArtifactId}:${quarkusPlatformVersion}"))
-    implementation("io.quarkus:quarkus-rest-jackson")
+    implementation("io.quarkus:quarkus-vertx")
     implementation("io.quarkus:quarkus-arc")
     testImplementation("io.quarkus:quarkus-junit5")
     testImplementation("io.rest-assured:rest-assured")
@@ -28,10 +28,6 @@ val javaVersion = providers.gradleProperty("javaVersion").orElse("25").get()
 java {
     sourceCompatibility = JavaVersion.toVersion(javaVersion)
     targetCompatibility = JavaVersion.toVersion(javaVersion)
-}
-
-tasks.withType<JavaCompile> {
-    options.compilerArgs.add("--add-modules=jdk.incubator.vector")
 }
 
 tasks.withType<JavaCompile> {

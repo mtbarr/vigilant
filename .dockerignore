@@ -1,5 +1,8 @@
-*
-!build/*-runner
-!build/*-runner.jar
-!build/lib/*
-!build/quarkus-app/*
+# so exclui o que atrapalha a build
+.git
+.gradle
+build
+.references
+.idea
+*.md
+.gitignore
