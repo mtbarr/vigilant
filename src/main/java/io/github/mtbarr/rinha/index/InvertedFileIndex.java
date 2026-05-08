@@ -136,8 +136,14 @@ public class InvertedFileIndex {
         final long idsOffset = listPositions[c] + 4L;
         final long codesOffset = idsOffset + (long) size * 4L;
         final int destOff = clusterOffsets[c];
-        indexSegment.asSlice(idsOffset, (long) size * 4L).asByteBuffer().order(ByteOrder.LITTLE_ENDIAN).asIntBuffer().get(flatIds, destOff, size);
-        indexSegment.asSlice(codesOffset, (long) size * PQ_M).asByteBuffer().get(flatCodes, destOff * PQ_M, size * PQ_M);
+        indexSegment.asSlice(idsOffset, (long) size * 4L)
+          .asByteBuffer()
+          .order(ByteOrder.LITTLE_ENDIAN)
+          .asIntBuffer()
+          .get(flatIds, destOff, size);
+        indexSegment.asSlice(codesOffset, (long) size * PQ_M)
+          .asByteBuffer()
+          .get(flatCodes, destOff * PQ_M, size * PQ_M);
       }
       this.indexSegment = indexSegment;
 
@@ -172,10 +178,14 @@ public class InvertedFileIndex {
       dist = Math.fma(queryVector[7] - ivfCentroidsFlat[base + 7], queryVector[7] - ivfCentroidsFlat[base + 7], dist);
       dist = Math.fma(queryVector[8] - ivfCentroidsFlat[base + 8], queryVector[8] - ivfCentroidsFlat[base + 8], dist);
       dist = Math.fma(queryVector[9] - ivfCentroidsFlat[base + 9], queryVector[9] - ivfCentroidsFlat[base + 9], dist);
-      dist = Math.fma(queryVector[10] - ivfCentroidsFlat[base + 10], queryVector[10] - ivfCentroidsFlat[base + 10], dist);
-      dist = Math.fma(queryVector[11] - ivfCentroidsFlat[base + 11], queryVector[11] - ivfCentroidsFlat[base + 11], dist);
-      dist = Math.fma(queryVector[12] - ivfCentroidsFlat[base + 12], queryVector[12] - ivfCentroidsFlat[base + 12], dist);
-      dist = Math.fma(queryVector[13] - ivfCentroidsFlat[base + 13], queryVector[13] - ivfCentroidsFlat[base + 13], dist);
+      dist = Math.fma(
+        queryVector[10] - ivfCentroidsFlat[base + 10], queryVector[10] - ivfCentroidsFlat[base + 10], dist);
+      dist = Math.fma(
+        queryVector[11] - ivfCentroidsFlat[base + 11], queryVector[11] - ivfCentroidsFlat[base + 11], dist);
+      dist = Math.fma(
+        queryVector[12] - ivfCentroidsFlat[base + 12], queryVector[12] - ivfCentroidsFlat[base + 12], dist);
+      dist = Math.fma(
+        queryVector[13] - ivfCentroidsFlat[base + 13], queryVector[13] - ivfCentroidsFlat[base + 13], dist);
       centroidDistances[ci] = dist;
       centroidOrder[ci] = ci;
     }
@@ -277,7 +287,9 @@ public class InvertedFileIndex {
     final float[] q = new float[NUM_DIMENSIONS];
     final int[] ids = new int[NUM_NEIGHBORS];
     final float[] dists = new float[NUM_NEIGHBORS];
-    for (int i = 0; i < 3; i++) searchNearestNeighbors(q, ids, dists);
+    for (int i = 0; i < 500; i++) {
+      searchNearestNeighbors(q, ids, dists);
+    }
   }
 
   private static void insertIntoSortedArray(
