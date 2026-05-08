@@ -96,13 +96,19 @@ public class InvertedFileIndex {
 
       final long codebooksOffset = centroidsOffset + (long) NUM_CLUSTERS * NUM_DIMENSIONS * 4L;
       pqCodebooksFlat = new float[PQ_M][PQ_CODEBOOK_SIZE * PQ_SUB_D];
+
       final MemorySegment codebooksSegment = indexSegment.asSlice(
-        codebooksOffset, (long) PQ_M * PQ_CODEBOOK_SIZE * PQ_SUB_D * 4L);
+        codebooksOffset,
+        (long) PQ_M * PQ_CODEBOOK_SIZE * PQ_SUB_D * 4L
+      );
+
       for (int m = 0; m < PQ_M; m++) {
         for (int c = 0; c < PQ_CODEBOOK_SIZE; c++) {
           for (int d = 0; d < PQ_SUB_D; d++) {
             pqCodebooksFlat[m][c * PQ_SUB_D + d] = codebooksSegment.get(
-              FLOAT_LE, (long) (m * PQ_CODEBOOK_SIZE * PQ_SUB_D + c * PQ_SUB_D + d) * 4L);
+              FLOAT_LE,
+              (long) (m * PQ_CODEBOOK_SIZE * PQ_SUB_D + c * PQ_SUB_D + d) * 4L
+            );
           }
         }
       }
@@ -169,6 +175,8 @@ public class InvertedFileIndex {
       final int base = ci * NUM_DIMENSIONS;
       final float d0 = queryVector[0] - ivfCentroidsFlat[base];
       float dist = d0 * d0;
+
+      // Isso aqui vai ser mais rápido do que iterar....
       dist = Math.fma(queryVector[1] - ivfCentroidsFlat[base + 1], queryVector[1] - ivfCentroidsFlat[base + 1], dist);
       dist = Math.fma(queryVector[2] - ivfCentroidsFlat[base + 2], queryVector[2] - ivfCentroidsFlat[base + 2], dist);
       dist = Math.fma(queryVector[3] - ivfCentroidsFlat[base + 3], queryVector[3] - ivfCentroidsFlat[base + 3], dist);
@@ -189,7 +197,7 @@ public class InvertedFileIndex {
       centroidDistances[ci] = dist;
       centroidOrder[ci] = ci;
     }
-    partialSortCentroids(centroidOrder, centroidDistances, NUM_PROBE_CLUSTERS);
+    partialSortCentroids(centroidOrder, centroidDistances);
 
     final float[] adcTable = adcLookupFlat.get();
     buildAdcLookupTable(queryVector, adcTable);
@@ -209,7 +217,7 @@ public class InvertedFileIndex {
           approx += adcTable[m * 256 + (flatCodes[codeOff + m] & 0xFF)];
         }
         if (approx < neighborDistances[NUM_NEIGHBORS - 1]) {
-          insertIntoSortedArray(neighborIds, neighborDistances, NUM_NEIGHBORS, flatIds[i], approx);
+          insertIntoSortedArray(neighborIds, neighborDistances, flatIds[i], approx);
         }
       }
 
@@ -295,11 +303,10 @@ public class InvertedFileIndex {
   private static void insertIntoSortedArray(
     final int[] ids,
     final float[] dists,
-    final int max,
     final int newId,
     final float newDist
   ) {
-    int pos = max - 1;
+    int pos = InvertedFileIndex.NUM_NEIGHBORS - 1;
     while (pos > 0 && dists[pos - 1] > newDist) {
       dists[pos] = dists[pos - 1];
       ids[pos] = ids[pos - 1];
@@ -311,11 +318,10 @@ public class InvertedFileIndex {
 
   private static void partialSortCentroids(
     final int[] order,
-    final float[] dist,
-    final int top
+    final float[] dist
   ) {
-    quickselect(order, dist, 0, order.length - 1, top);
-    for (int i = 1; i < top; i++) {
+    quickselect(order, dist, 0, order.length - 1, InvertedFileIndex.NUM_PROBE_CLUSTERS);
+    for (int i = 1; i < InvertedFileIndex.NUM_PROBE_CLUSTERS; i++) {
       final int o = order[i];
       final float d = dist[o];
       int j = i - 1;
