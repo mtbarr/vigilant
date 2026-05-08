@@ -20,7 +20,7 @@ public class InvertedFileIndex {
   private static final int PQ_M = 14;
   private static final int PQ_SUB_D = 1;
   private static final int PQ_CODEBOOK_SIZE = 256;
-  private static final int NUM_PROBE_CLUSTERS = 24;
+  private static final int NUM_PROBE_CLUSTERS = 12;
   private static final int NUM_PROBE_GRAY = 8;
   private static final int NUM_NEIGHBORS = 10;
   private static final int RERANK_TOP = 5;
