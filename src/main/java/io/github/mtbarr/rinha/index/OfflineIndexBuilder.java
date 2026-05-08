@@ -19,8 +19,8 @@ public final class OfflineIndexBuilder {
 
   private static final int NUM_CLUSTERS = 512;
   private static final int NUM_DIMENSIONS = 14;
-  private static final int PQ_M = 14;
-  private static final int PQ_SUB_D = 1;
+  private static final int PQ_M = 7;
+  private static final int PQ_SUB_D = 2;
   private static final int PQ_CODEBOOK_SIZE = 256;
   private static final int TRAINING_SAMPLE_SIZE = Integer.MAX_VALUE;
   private static final int IVF_MAX_ITERATIONS = 20;
