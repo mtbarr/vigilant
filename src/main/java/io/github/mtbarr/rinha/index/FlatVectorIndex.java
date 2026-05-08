@@ -34,7 +34,7 @@ public class FlatVectorIndex {
   @PostConstruct
   void initialize() {
     try {
-      load();
+      //load();
       ready = true;
       System.out.println("Flat index loaded: " + count + " vectors");
     } catch (final Exception e) {
@@ -44,13 +44,21 @@ public class FlatVectorIndex {
 
   private void load() throws IOException {
     try (final InputStream is = getClass().getResourceAsStream("/flat_index.bin")) {
-      if (is == null) throw new IOException("Resource /flat_index.bin not found");
+      if (is == null) {
+        throw new IOException("Resource /flat_index.bin not found");
+      }
       final byte[] data = is.readAllBytes();
       final ByteBuffer buf = ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN);
-      if (buf.getInt() != 0x464C4154) throw new IOException("Bad magic");
-      if (buf.getInt() != 1) throw new IOException("Bad version");
+      if (buf.getInt() != 0x464C4154) {
+        throw new IOException("Bad magic");
+      }
+      if (buf.getInt() != 1) {
+        throw new IOException("Bad version");
+      }
       count = buf.getInt();
-      if (buf.getInt() != PADDED) throw new IOException("Bad padded_d");
+      if (buf.getInt() != PADDED) {
+        throw new IOException("Bad padded_d");
+      }
       buf.getInt(); // scale
       final int total = count * PADDED;
       vectors = new short[total];
