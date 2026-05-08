@@ -45,8 +45,8 @@ public class InvertedFileIndex {
   private final ThreadLocal<int[]> centroidOrderBuffer = ThreadLocal.withInitial(
     () -> new int[NUM_CLUSTERS]
   );
-  private final ThreadLocal<float[][]> adcLookupTable = ThreadLocal.withInitial(
-    () -> new float[PQ_M][PQ_CODEBOOK_SIZE]
+  private final ThreadLocal<float[]> adcLookupFlat = ThreadLocal.withInitial(
+    () -> new float[PQ_M * PQ_CODEBOOK_SIZE]
   );
 
   @PostConstruct
@@ -191,7 +191,7 @@ public class InvertedFileIndex {
     }
     partialSortCentroids(centroidOrder, centroidDistances, NUM_PROBE_CLUSTERS);
 
-    final float[][] adcTable = adcLookupTable.get();
+    final float[] adcTable = adcLookupFlat.get();
     buildAdcLookupTable(queryVector, adcTable);
 
     Arrays.fill(neighborIds, -1);
@@ -206,7 +206,7 @@ public class InvertedFileIndex {
       for (int i = startIdx; i < endIdx; i++, codeOff += PQ_M) {
         float approx = 0f;
         for (int m = 0; m < PQ_M; m++) {
-          approx += adcTable[m][flatCodes[codeOff + m] & 0xFF];
+          approx += adcTable[m * 256 + (flatCodes[codeOff + m] & 0xFF)];
         }
         if (approx < neighborDistances[NUM_NEIGHBORS - 1]) {
           insertIntoSortedArray(neighborIds, neighborDistances, NUM_NEIGHBORS, flatIds[i], approx);
@@ -266,15 +266,15 @@ public class InvertedFileIndex {
 
   private void buildAdcLookupTable(
     final float[] queryVector,
-    final float[][] lookupTable
+    final float[] lookupFlat
   ) {
     for (int m = 0; m < PQ_M; m++) {
       final float q = queryVector[m];
       final float[] cb = pqCodebooksFlat[m];
-      final float[] row = lookupTable[m];
+      final int rowOff = m << 8;
       for (int c = 0; c < PQ_CODEBOOK_SIZE; c++) {
         final float d = q - cb[c];
-        row[c] = d * d;
+        lookupFlat[rowOff + c] = d * d;
       }
     }
   }
