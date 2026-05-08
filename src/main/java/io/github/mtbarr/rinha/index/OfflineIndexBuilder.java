@@ -19,8 +19,8 @@ public final class OfflineIndexBuilder {
 
   private static final int NUM_CLUSTERS = 512;
   private static final int NUM_DIMENSIONS = 14;
-  private static final int PQ_M = 7;
-  private static final int PQ_SUB_D = 2;
+  private static final int PQ_M = 14;
+  private static final int PQ_SUB_D = 1;
   private static final int PQ_CODEBOOK_SIZE = 256;
   private static final int TRAINING_SAMPLE_SIZE = Integer.MAX_VALUE;
   private static final int IVF_MAX_ITERATIONS = 20;
@@ -329,8 +329,9 @@ public final class OfflineIndexBuilder {
       final int offset = subspaceIndex * PQ_SUB_D;
       final float[][] subVectors = new float[vectors.length][PQ_SUB_D];
       for (int i = 0; i < vectors.length; i++) {
-        subVectors[i][0] = vectors[i][offset];
-        subVectors[i][1] = vectors[i][offset + 1];
+        for (int d = 0; d < PQ_SUB_D; d++) {
+          subVectors[i][d] = vectors[i][offset + d];
+        }
       }
       codebooks[subspaceIndex] = runKMeansOnSubspace(
         subVectors,
@@ -360,9 +361,11 @@ public final class OfflineIndexBuilder {
         float bestDistance = Float.MAX_VALUE;
         int bestCluster = 0;
         for (int c = 0; c < numClusters; c++) {
-          final float d0 = data[i][0] - centroids[c][0];
-          final float d1 = data[i][1] - centroids[c][1];
-          final float distance = d0 * d0 + d1 * d1;
+          float distance = 0f;
+          for (int d = 0; d < PQ_SUB_D; d++) {
+            final float delta = data[i][d] - centroids[c][d];
+            distance += delta * delta;
+          }
           if (distance < bestDistance) {
             bestDistance = distance;
             bestCluster = c;
@@ -381,14 +384,16 @@ public final class OfflineIndexBuilder {
       for (int i = 0; i < numPoints; i++) {
         final int cluster = assignments[i];
         clusterCounts[cluster]++;
-        clusterSums[cluster][0] += data[i][0];
-        clusterSums[cluster][1] += data[i][1];
+        for (int d = 0; d < PQ_SUB_D; d++) {
+          clusterSums[cluster][d] += data[i][d];
+        }
       }
       for (int c = 0; c < numClusters; c++) {
         if (clusterCounts[c] > 0) {
           final float inv = 1f / clusterCounts[c];
-          centroids[c][0] = (float) (clusterSums[c][0] * inv);
-          centroids[c][1] = (float) (clusterSums[c][1] * inv);
+          for (int d = 0; d < PQ_SUB_D; d++) {
+            centroids[c][d] = (float) (clusterSums[c][d] * inv);
+          }
         }
       }
     }
@@ -429,9 +434,12 @@ public final class OfflineIndexBuilder {
   }
 
   private static float squaredDist(final float[] a, final float[] b) {
-    final float d0 = a[0] - b[0];
-    final float d1 = a[1] - b[1];
-    return d0 * d0 + d1 * d1;
+    float sum = 0f;
+    for (int d = 0; d < PQ_SUB_D; d++) {
+      final float delta = a[d] - b[d];
+      sum += delta * delta;
+    }
+    return sum;
   }
 
   private static byte[][] encodeAllVectors(final float[][] vectors, final float[][][] codebooks) {
@@ -440,14 +448,14 @@ public final class OfflineIndexBuilder {
     IntStream.range(0, numVectors).parallel().forEach(i -> {
       for (int subspaceIndex = 0; subspaceIndex < PQ_M; subspaceIndex++) {
         final int offset = subspaceIndex * PQ_SUB_D;
-        final float query0 = vectors[i][offset];
-        final float query1 = vectors[i][offset + 1];
         float bestDistance = Float.MAX_VALUE;
         int bestCentroid = 0;
         for (int c = 0; c < PQ_CODEBOOK_SIZE; c++) {
-          final float delta0 = query0 - codebooks[subspaceIndex][c][0];
-          final float delta1 = query1 - codebooks[subspaceIndex][c][1];
-          final float distance = delta0 * delta0 + delta1 * delta1;
+          float distance = 0f;
+          for (int d = 0; d < PQ_SUB_D; d++) {
+            final float delta = vectors[i][offset + d] - codebooks[subspaceIndex][c][d];
+            distance += delta * delta;
+          }
           if (distance < bestDistance) {
             bestDistance = distance;
             bestCentroid = c;

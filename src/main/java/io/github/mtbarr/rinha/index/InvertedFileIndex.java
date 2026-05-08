@@ -17,8 +17,8 @@ public class InvertedFileIndex {
 
   private static final int NUM_CLUSTERS = 512;
   private static final int NUM_DIMENSIONS = 14;
-  private static final int PQ_M = 7;
-  private static final int PQ_SUB_D = 2;
+  private static final int PQ_M = 14;
+  private static final int PQ_SUB_D = 1;
   private static final int PQ_CODEBOOK_SIZE = 256;
   private static final int NUM_PROBE_CLUSTERS = 24;
   private static final int NUM_PROBE_GRAY = 8;
@@ -237,13 +237,11 @@ public class InvertedFileIndex {
     final byte[] codes,
     final int off
   ) {
-    return table[0][codes[off] & 0xFF]
-           + table[1][codes[off + 1] & 0xFF]
-           + table[2][codes[off + 2] & 0xFF]
-           + table[3][codes[off + 3] & 0xFF]
-           + table[4][codes[off + 4] & 0xFF]
-           + table[5][codes[off + 5] & 0xFF]
-           + table[6][codes[off + 6] & 0xFF];
+    float d = 0f;
+    for (int m = 0; m < PQ_M; m++) {
+      d += table[m][codes[off + m] & 0xFF];
+    }
+    return d;
   }
 
   private void buildAdcLookupTable(
@@ -251,14 +249,15 @@ public class InvertedFileIndex {
     final float[][] lookupTable
   ) {
     for (int m = 0; m < PQ_M; m++) {
-      final float q0 = queryVector[m * PQ_SUB_D];
-      final float q1 = queryVector[m * PQ_SUB_D + 1];
       final float[] cb = pqCodebooksFlat[m];
       final float[] row = lookupTable[m];
       for (int c = 0; c < PQ_CODEBOOK_SIZE; c++) {
-        final float d0 = q0 - cb[c * 2];
-        final float d1 = q1 - cb[c * 2 + 1];
-        row[c] = d0 * d0 + d1 * d1;
+        float dist = 0f;
+        for (int d = 0; d < PQ_SUB_D; d++) {
+          final float delta = queryVector[m * PQ_SUB_D + d] - cb[c * PQ_SUB_D + d];
+          dist += delta * delta;
+        }
+        row[c] = dist;
       }
     }
   }
