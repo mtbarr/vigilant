@@ -12,7 +12,7 @@ import jakarta.inject.Singleton;
 @Singleton
 public final class VertxHttpServer {
 
-  private static final int NEIGHBOR_COUNT = 5;
+  private static final int NEIGHBOR_COUNT = 10;
 
   private static final String[] FRAUD_SCORE_RESPONSES = {
     "{\"approved\":true,\"fraud_score\":0.0}",

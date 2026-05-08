@@ -22,7 +22,8 @@ public class InvertedFileIndex {
   private static final int PQ_CODEBOOK_SIZE = 256;
   private static final int NUM_PROBE_CLUSTERS = 24;
   private static final int NUM_PROBE_GRAY = 8;
-  private static final int NUM_NEIGHBORS = 5;
+  private static final int NUM_NEIGHBORS = 10;
+  private static final int RERANK_TOP = 5;
 
   private static final ValueLayout.OfInt INT_LE = ValueLayout.JAVA_INT.withOrder(ByteOrder.LITTLE_ENDIAN);
   private static final ValueLayout.OfLong LONG_LE = ValueLayout.JAVA_LONG.withOrder(ByteOrder.LITTLE_ENDIAN);
@@ -34,6 +35,8 @@ public class InvertedFileIndex {
   private int[][] idsByCluster;
   private byte[][] codesByCluster;
   private volatile boolean isIndexReady = false;
+  private MemorySegment indexSegment;
+  private long vectorsOffset;
 
   private final ThreadLocal<float[]> centroidDistanceBuffer = ThreadLocal.withInitial(
     () -> new float[NUM_CLUSTERS]
@@ -78,6 +81,7 @@ public class InvertedFileIndex {
         throw new IOException("Expected K=" + NUM_CLUSTERS + " got " + storedClusters);
       }
       final int totalVectorCount = indexSegment.get(INT_LE, 12);
+      this.vectorsOffset = indexSegment.get(LONG_LE, 16);
       final long labelsOffset = indexSegment.get(LONG_LE, 24);
 
       final long centroidsOffset = 36L;
@@ -127,6 +131,7 @@ public class InvertedFileIndex {
         final long dataSize = 4L + (long) size * 4L + (long) size * PQ_M;
         offset += (dataSize + 3L) & ~3L;
       }
+      this.indexSegment = indexSegment;
 
       int fraudCount = 0;
       for (byte label : fraudLabels) {
@@ -178,20 +183,49 @@ public class InvertedFileIndex {
 
       if (probe == NUM_PROBE_GRAY - 1) {
         int fc = 0;
-        for (int k = 0; k < NUM_NEIGHBORS; k++) {
+        for (int k = 0; k < RERANK_TOP; k++) {
           if (neighborIds[k] >= 0 && fraudLabels[neighborIds[k]] == 1) {
             fc++;
           }
         }
-        if (fc <= 1 || fc >= NUM_NEIGHBORS - 1) {
+        if (fc <= 1 || fc >= RERANK_TOP - 1) {
           return fc;
         }
       }
     }
 
-    int fraudVoteCount = 0;
     for (int k = 0; k < NUM_NEIGHBORS; k++) {
-      if (neighborIds[k] >= 0 && fraudLabels[neighborIds[k]] == 1) {
+      if (neighborIds[k] >= 0) {
+        final long baseOff = vectorsOffset + (long) neighborIds[k] * NUM_DIMENSIONS * 4L;
+        float exactDist = 0f;
+        for (int d = 0; d < NUM_DIMENSIONS; d++) {
+          final float delta = queryVector[d] - indexSegment.get(FLOAT_LE, baseOff + d * 4L);
+          exactDist = Math.fma(delta, delta, exactDist);
+        }
+        neighborDistances[k] = exactDist;
+      } else {
+        neighborDistances[k] = Float.MAX_VALUE;
+      }
+    }
+
+    for (int i = 0; i < RERANK_TOP; i++) {
+      int best = i;
+      for (int j = i + 1; j < NUM_NEIGHBORS; j++) {
+        if (neighborDistances[j] < neighborDistances[best]) {
+          best = j;
+        }
+      }
+      final int tmpId = neighborIds[i];
+      neighborIds[i] = neighborIds[best];
+      neighborIds[best] = tmpId;
+      final float tmpDist = neighborDistances[i];
+      neighborDistances[i] = neighborDistances[best];
+      neighborDistances[best] = tmpDist;
+    }
+
+    int fraudVoteCount = 0;
+    for (int k = 0; k < RERANK_TOP; k++) {
+      if (fraudLabels[neighborIds[k]] == 1) {
         fraudVoteCount++;
       }
     }
