@@ -11,9 +11,6 @@ import java.lang.foreign.ValueLayout;
 import java.nio.ByteOrder;
 import java.nio.channels.FileChannel.MapMode;
 import java.util.Arrays;
-import jdk.incubator.vector.FloatVector;
-import jdk.incubator.vector.VectorOperators;
-import jdk.incubator.vector.VectorSpecies;
 
 @Singleton
 public class InvertedFileIndex {
@@ -24,8 +21,6 @@ public class InvertedFileIndex {
   private static final int NUM_PROBE_GRAY = 8;
   private static final int NUM_NEIGHBORS = 5;
   private static final float I16_SCALE = 32767.0f;
-
-  private static final VectorSpecies<Float> FLOAT_SPECIES = FloatVector.SPECIES_PREFERRED;
 
   private static final ValueLayout.OfInt INT_LE = ValueLayout.JAVA_INT.withOrder(ByteOrder.LITTLE_ENDIAN);
   private static final ValueLayout.OfLong LONG_LE = ValueLayout.JAVA_LONG.withOrder(ByteOrder.LITTLE_ENDIAN);
@@ -131,13 +126,16 @@ public class InvertedFileIndex {
 
     for (int ci = 0; ci < NUM_CLUSTERS; ci++) {
       final int base = ci * NUM_DIMENSIONS;
-      float dist = simdSquaredDistance(queryVector, ivfCentroidsFlat, base);
+      float dist = 0.0f;
+      for (int d = 0; d < NUM_DIMENSIONS; d++) {
+        final float delta = queryVector[d] - ivfCentroidsFlat[base + d];
+        dist += delta * delta;
+      }
       centroidDistances[ci] = dist;
       centroidOrder[ci] = ci;
     }
     partialSortCentroids(centroidOrder, centroidDistances, NUM_PROBE_CLUSTERS);
 
-    // Scale query for i16 distance
     final float[] queryScaled = queryScaledBuffer.get();
     for (int d = 0; d < NUM_DIMENSIONS; d++) {
       queryScaled[d] = queryVector[d] * I16_SCALE;
@@ -185,23 +183,6 @@ public class InvertedFileIndex {
     for (int d = 0; d < NUM_DIMENSIONS; d++) {
       final float diff = queryScaled[d] - vectorsI16[base + d];
       sum = Math.fma(diff, diff, sum);
-    }
-    return sum;
-  }
-
-  private static float simdSquaredDistance(final float[] a, final float[] b, final int bOffset) {
-    int i = 0;
-    float sum = 0.0f;
-    final int limit = FLOAT_SPECIES.loopBound(NUM_DIMENSIONS);
-    for (; i < limit; i += FLOAT_SPECIES.length()) {
-      FloatVector va = FloatVector.fromArray(FLOAT_SPECIES, a, i);
-      FloatVector vb = FloatVector.fromArray(FLOAT_SPECIES, b, bOffset + i);
-      FloatVector diff = va.sub(vb);
-      sum += diff.mul(diff).reduceLanes(VectorOperators.ADD);
-    }
-    for (; i < NUM_DIMENSIONS; i++) {
-      final float diff = a[i] - b[bOffset + i];
-      sum += diff * diff;
     }
     return sum;
   }

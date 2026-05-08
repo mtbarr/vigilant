@@ -3,10 +3,9 @@ FROM ghcr.io/graalvm/graalvm-community:25 AS native-builder
 WORKDIR /build
 COPY . .
 RUN chmod +x gradlew
-ENV JAVA_TOOL_OPTIONS="--add-modules=jdk.incubator.vector"
 RUN ./gradlew quarkusBuild \
     -Dquarkus.package.type=native \
-    -Dquarkus.native.additional-build-args="-march=haswell,-J--add-modules=jdk.incubator.vector" \
+    -Dquarkus.native.additional-build-args="-march=haswell" \
     --no-daemon
 
 FROM gcr.io/distroless/base-debian12
