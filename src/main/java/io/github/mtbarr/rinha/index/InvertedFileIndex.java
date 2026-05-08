@@ -15,13 +15,13 @@ import java.util.Arrays;
 @Singleton
 public class InvertedFileIndex {
 
-  private static final int NUM_CLUSTERS = 512;
+  private static final int NUM_CLUSTERS = 2048;
   private static final int NUM_DIMENSIONS = 14;
   private static final int PQ_M = 7;
   private static final int PQ_SUB_D = 2;
   private static final int PQ_CODEBOOK_SIZE = 256;
-  private static final int NUM_PROBE_CLUSTERS = 24;
-  private static final int NUM_PROBE_GRAY = 8;
+  private static final int NUM_PROBE_CLUSTERS = 12;
+  private static final int NUM_PROBE_GRAY = 4;
   private static final int NUM_NEIGHBORS = 10;
   private static final int RERANK_TOP = 5;
 
