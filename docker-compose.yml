@@ -16,8 +16,7 @@ services:
           memory: "30M"
 
   api1: &api
-    image: ${API_IMAGE:-vigilant:latest}
-    build: .
+    image: mtbarr/vigilant:latest
     environment:
       INDEX_PATH: /app/data/index.bin
     deploy:
