@@ -38,6 +38,7 @@ public class InvertedFileIndex {
   private volatile boolean isIndexReady = false;
   private MemorySegment indexSegment;
   private long vectorsOffset;
+  private float[] exactVectors;
 
   private final ThreadLocal<float[]> centroidDistanceBuffer = ThreadLocal.withInitial(
     () -> new float[NUM_CLUSTERS]
@@ -116,6 +117,10 @@ public class InvertedFileIndex {
       fraudLabels = new byte[totalVectorCount];
       final MemorySegment labelsSegment = indexSegment.asSlice(labelsOffset, totalVectorCount);
       labelsSegment.asByteBuffer().get(fraudLabels);
+
+      exactVectors = new float[totalVectorCount * NUM_DIMENSIONS];
+      final MemorySegment vecSeg = indexSegment.asSlice(vectorsOffset, (long) totalVectorCount * NUM_DIMENSIONS * 4L);
+      vecSeg.asByteBuffer().order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer().get(exactVectors);
 
       // --- Copy inverted lists to flat arrays ---
       final long invertedListsOffset = labelsOffset + totalVectorCount;
@@ -236,10 +241,10 @@ public class InvertedFileIndex {
 
     for (int k = 0; k < NUM_NEIGHBORS; k++) {
       if (neighborIds[k] >= 0) {
-        final long baseOff = vectorsOffset + (long) neighborIds[k] * NUM_DIMENSIONS * 4L;
+        final int baseOff = neighborIds[k] * NUM_DIMENSIONS;
         float exactDist = 0f;
         for (int d = 0; d < NUM_DIMENSIONS; d++) {
-          final float delta = queryVector[d] - indexSegment.get(FLOAT_LE, baseOff + d * 4L);
+          final float delta = queryVector[d] - exactVectors[baseOff + d];
           exactDist = Math.fma(delta, delta, exactDist);
         }
         neighborDistances[k] = exactDist;
