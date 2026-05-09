@@ -27,3 +27,7 @@ services:
 
   api2:
     <<: *api
+
+networks:
+  rinha:
+    driver: bridge
