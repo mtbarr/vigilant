@@ -1,7 +1,6 @@
 # Vigilant — Rinha de Backend 2026
 
-Implementação em Java para a [Rinha de Backend 2026](https://github.com/zanfranceschi/rinha-de-backend-2026): classificação de transações financeiras como
-fraude ou legítimo via busca k-NN em espaço de 14 dimensões.
+Implementação em Java para a [Rinha de Backend 2026](https://github.com/zanfranceschi/rinha-de-backend-2026)
 
 ## O Problema
 
