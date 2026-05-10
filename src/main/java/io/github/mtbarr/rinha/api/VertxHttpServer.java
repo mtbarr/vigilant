@@ -29,7 +29,6 @@ public final class VertxHttpServer {
   private static final String PATH_FRAUD_SCORE = "/fraud-score";
   private static final String CONTENT_TYPE_JSON = "application/json";
 
-  // Buffers reutilizados por thread — zero alocação no caminho quente
   private final ThreadLocal<int[]> neighborIdBuffer = ThreadLocal.withInitial(
     () -> new int[NEIGHBOR_COUNT]
   );
@@ -65,10 +64,13 @@ public final class VertxHttpServer {
             return;
           }
           httpRequest.bodyHandler(requestBody -> {
-            final String response = buildFraudScoreResponse(requestBody.getBytes());
-            httpRequest.response()
-              .putHeader("Content-Type", CONTENT_TYPE_JSON)
-              .end(response);
+            final HttpServerResponse response = httpRequest.response();
+            response.putHeader("Content-Type", CONTENT_TYPE_JSON);
+            try {
+              response.end(buildFraudScoreResponse(requestBody.getBytes()));
+            } catch (final Exception unexpectedError) {
+              response.end(FRAUD_SCORE_RESPONSES[0]);
+            }
           });
           return;
         }
