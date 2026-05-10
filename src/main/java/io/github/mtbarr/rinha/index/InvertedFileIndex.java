@@ -51,15 +51,17 @@ public class InvertedFileIndex {
 
   @PostConstruct
   void initialize() {
-    final String indexPath = System.getenv().getOrDefault("INDEX_PATH", "/data/index.bin");
-    try {
-      loadIndexFromFile(indexPath);
-      warmup();
-      isIndexReady = true;
-    } catch (final Exception exception) {
-      System.err.println("Index not loaded: " + exception.getMessage());
-      isIndexReady = false;
-    }
+    Thread.ofVirtual().name("index-loader").start(() -> {
+      final String indexPath = System.getenv().getOrDefault("INDEX_PATH", "/data/index.bin");
+      try {
+        this.loadIndexFromFile(indexPath);
+        warmup();
+        isIndexReady = true;
+      } catch (final Exception exception) {
+        System.err.println("Index not loaded: " + exception.getMessage());
+        isIndexReady = false;
+      }
+    });
   }
 
   private void loadIndexFromFile(final String filePath) throws IOException {
