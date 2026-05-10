@@ -118,9 +118,12 @@ public class InvertedFileIndex {
       final MemorySegment labelsSegment = indexSegment.asSlice(labelsOffset, totalVectorCount);
       labelsSegment.asByteBuffer().get(fraudLabels);
 
+      final long vecDataLen = (long) totalVectorCount * NUM_DIMENSIONS * 4L;
       exactVectors = new float[totalVectorCount * NUM_DIMENSIONS];
-      final MemorySegment vecSeg = indexSegment.asSlice(vectorsOffset, (long) totalVectorCount * NUM_DIMENSIONS * 4L);
-      vecSeg.asByteBuffer().order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer().get(exactVectors);
+      final MemorySegment vecSeg = indexSegment.asSlice(vectorsOffset, vecDataLen);
+      for (int i = 0; i < exactVectors.length; i++) {
+        exactVectors[i] = vecSeg.get(FLOAT_LE, (long) i * 4L);
+      }
 
       // --- Copy inverted lists to flat arrays ---
       final long invertedListsOffset = labelsOffset + totalVectorCount;
