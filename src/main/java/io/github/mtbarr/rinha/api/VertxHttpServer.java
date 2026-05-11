@@ -16,13 +16,13 @@ public final class VertxHttpServer {
 
   private static final int NEIGHBOR_COUNT = 10;
 
-  private static final String[] FRAUD_SCORE_RESPONSES = {
-    "{\"approved\":true,\"fraud_score\":0.0}",
-    "{\"approved\":true,\"fraud_score\":0.2}",
-    "{\"approved\":true,\"fraud_score\":0.4}",
-    "{\"approved\":false,\"fraud_score\":0.6}",
-    "{\"approved\":false,\"fraud_score\":0.8}",
-    "{\"approved\":false,\"fraud_score\":1.0}"
+  private static final byte[][] FRAUD_SCORE_RESPONSES = {
+    "{\"approved\":true,\"fraud_score\":0.0}".getBytes(java.nio.charset.StandardCharsets.US_ASCII),
+    "{\"approved\":true,\"fraud_score\":0.2}".getBytes(java.nio.charset.StandardCharsets.US_ASCII),
+    "{\"approved\":true,\"fraud_score\":0.4}".getBytes(java.nio.charset.StandardCharsets.US_ASCII),
+    "{\"approved\":false,\"fraud_score\":0.6}".getBytes(java.nio.charset.StandardCharsets.US_ASCII),
+    "{\"approved\":false,\"fraud_score\":0.8}".getBytes(java.nio.charset.StandardCharsets.US_ASCII),
+    "{\"approved\":false,\"fraud_score\":1.0}".getBytes(java.nio.charset.StandardCharsets.US_ASCII)
   };
 
   private static final String PATH_READY = "/ready";
@@ -70,8 +70,8 @@ public final class VertxHttpServer {
             vertxEngine.executeBlocking(
               () -> buildFraudScoreResponse(payload),
               false
-            ).onSuccess(response::end)
-             .onFailure(err -> response.end(FRAUD_SCORE_RESPONSES[0]));
+            ).onSuccess(r -> response.end(io.vertx.core.buffer.Buffer.buffer(r)))
+             .onFailure(err -> response.end(io.vertx.core.buffer.Buffer.buffer(FRAUD_SCORE_RESPONSES[0])));
           });
           return;
         }
@@ -88,7 +88,7 @@ public final class VertxHttpServer {
       .listen();
   }
 
-  private String buildFraudScoreResponse(final byte[] requestPayload) {
+  private byte[] buildFraudScoreResponse(final byte[] requestPayload) {
     final float[] featureVector = requestFeatureExtractor.extractFeatureVector(requestPayload);
     final int fraudVoteCount = fraudVectorIndex.searchNearestNeighbors(
       featureVector,
