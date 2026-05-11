@@ -152,6 +152,8 @@ public class InvertedFileIndex {
         }
       }
       System.out.println("Index loaded: " + totalVectorCount + " vectors, " + fraudCount + " fraud");
+    }catch (Exception e){
+      throw new IOException("Failed on loading index file" , e);
     }
   }
 
