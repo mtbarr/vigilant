@@ -52,7 +52,7 @@ public class InvertedFileIndex {
   void initialize() {
     final String indexPath = System.getenv().getOrDefault("INDEX_PATH", "/data/index.bin");
     try {
-      loadIndexFromFile(indexPath);
+      //loadIndexFromFile(indexPath);
       //warmup();
       isIndexReady = true;
     } catch (final Exception exception) {
