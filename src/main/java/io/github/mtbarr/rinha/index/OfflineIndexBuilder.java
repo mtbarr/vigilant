@@ -39,7 +39,7 @@ public final class OfflineIndexBuilder {
     final String inputPath = args[0];
     final String outputPath = args[1];
 
-    System.out.println("Loading dataset...");
+    System.out.println("Starting Loading dataset...");
     final byte[] rawData;
     try (final var gzipInputStream = new GZIPInputStream(new FileInputStream(inputPath))) {
       rawData = gzipInputStream.readAllBytes();
