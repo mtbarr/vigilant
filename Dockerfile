@@ -1,19 +1,12 @@
-# Stage 1: Build index offline (K-Means + quantizacao)
+# Stage 1: Build index offline (compila so o builder, zero deps)
 FROM eclipse-temurin:25-jdk AS index-builder
 WORKDIR /build
-
-COPY gradlew gradlew.bat ./
-RUN chmod +x gradlew
-COPY gradle ./gradle
-COPY build.gradle.kts settings.gradle.kts gradle.properties ./
-RUN ./gradlew :compileJava --no-daemon || true
-
-COPY src ./src
-RUN ./gradlew :compileJava --no-daemon
-
-RUN mkdir -p /data && java \
-    -Xmx4g \
-    -cp "$(./gradlew -q :printClasspath --no-daemon):build/classes/java/main" \
+COPY src/main/java/io/github/mtbarr/rinha/index/OfflineIndexBuilder.java \
+     src/main/java/io/github/mtbarr/rinha/index/OfflineIndexBuilder.java
+RUN mkdir -p classes && javac -d classes \
+    src/main/java/io/github/mtbarr/rinha/index/OfflineIndexBuilder.java
+COPY src/main/resources/references.json.gz src/main/resources/references.json.gz
+RUN java -Xmx4g -cp classes \
     io.github.mtbarr.rinha.index.OfflineIndexBuilder \
     src/main/resources/references.json.gz \
     /data/index.bin
@@ -23,10 +16,9 @@ FROM ghcr.io/graalvm/graalvm-community:25 AS native-builder
 WORKDIR /build
 COPY . .
 RUN chmod +x gradlew
-ENV JAVA_TOOL_OPTIONS="--add-modules=jdk.incubator.vector"
 RUN ./gradlew quarkusBuild \
     -Dquarkus.package.type=native \
-    -Dquarkus.native.additional-build-args="-march=haswell,-J--add-modules=jdk.incubator.vector" \
+    -Dquarkus.native.additional-build-args="-march=haswell,--gc=serial" \
     --no-daemon
 
 # Stage 3: Runtime com Debian 12 (GLIBC 2.36, suporta o binario nativo)

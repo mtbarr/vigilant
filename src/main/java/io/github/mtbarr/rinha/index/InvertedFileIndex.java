@@ -30,14 +30,12 @@ public class InvertedFileIndex {
   private static final ValueLayout.OfFloat FLOAT_LE = ValueLayout.JAVA_FLOAT.withOrder(ByteOrder.LITTLE_ENDIAN);
 
   private float[] ivfCentroidsFlat;
-  private float[][] pqCodebooksFlat;
+  private float[] pqCodebooksFlat;
   private byte[] fraudLabels;
   private int[] flatIds;
   private byte[] flatCodes;
   private int[] clusterOffsets;
   private volatile boolean isIndexReady = false;
-  private MemorySegment indexSegment;
-  private long vectorsOffset;
   private float[] exactVectors;
 
   private final ThreadLocal<float[]> centroidDistanceBuffer = ThreadLocal.withInitial(
@@ -84,7 +82,7 @@ public class InvertedFileIndex {
         throw new IOException("Expected K=" + NUM_CLUSTERS + " got " + storedClusters);
       }
       final int totalVectorCount = indexSegment.get(INT_LE, 12);
-      this.vectorsOffset = indexSegment.get(LONG_LE, 16);
+      long vectorsOffset = indexSegment.get(LONG_LE, 16);
       final long labelsOffset = indexSegment.get(LONG_LE, 24);
 
       final long centroidsOffset = 36L;
@@ -96,22 +94,11 @@ public class InvertedFileIndex {
       }
 
       final long codebooksOffset = centroidsOffset + (long) NUM_CLUSTERS * NUM_DIMENSIONS * 4L;
-      pqCodebooksFlat = new float[PQ_M][PQ_CODEBOOK_SIZE * PQ_SUB_D];
-
-      final MemorySegment codebooksSegment = indexSegment.asSlice(
-        codebooksOffset,
-        (long) PQ_M * PQ_CODEBOOK_SIZE * PQ_SUB_D * 4L
-      );
-
-      for (int m = 0; m < PQ_M; m++) {
-        for (int c = 0; c < PQ_CODEBOOK_SIZE; c++) {
-          for (int d = 0; d < PQ_SUB_D; d++) {
-            pqCodebooksFlat[m][c * PQ_SUB_D + d] = codebooksSegment.get(
-              FLOAT_LE,
-              (long) (m * PQ_CODEBOOK_SIZE * PQ_SUB_D + c * PQ_SUB_D + d) * 4L
-            );
-          }
-        }
+      final long cbLen = (long) PQ_M * PQ_CODEBOOK_SIZE * PQ_SUB_D * 4L;
+      pqCodebooksFlat = new float[PQ_M * PQ_CODEBOOK_SIZE * PQ_SUB_D];
+      final MemorySegment codebooksSegment = indexSegment.asSlice(codebooksOffset, cbLen);
+      for (int i = 0; i < pqCodebooksFlat.length; i++) {
+        pqCodebooksFlat[i] = codebooksSegment.get(FLOAT_LE, (long) i * 4L);
       }
 
       fraudLabels = new byte[totalVectorCount];
@@ -120,10 +107,8 @@ public class InvertedFileIndex {
 
       final long vecLen = (long) totalVectorCount * NUM_DIMENSIONS * 4L;
       exactVectors = new float[totalVectorCount * NUM_DIMENSIONS];
-      final MemorySegment vs = indexSegment.asSlice(vectorsOffset, vecLen);
-      for (int i = 0; i < exactVectors.length; i++) {
-        exactVectors[i] = vs.get(FLOAT_LE, (long) i * 4L);
-      }
+      indexSegment.asSlice(vectorsOffset, vecLen)
+        .asByteBuffer().order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer().get(exactVectors);
 
       // --- Copy inverted lists to flat arrays ---
       final long invertedListsOffset = labelsOffset + totalVectorCount;
@@ -159,7 +144,6 @@ public class InvertedFileIndex {
           .asByteBuffer()
           .get(flatCodes, destOff * PQ_M, size * PQ_M);
       }
-      this.indexSegment = indexSegment;
 
       int fraudCount = 0;
       for (byte label : fraudLabels) {
@@ -220,24 +204,22 @@ public class InvertedFileIndex {
 
       int codeOff = startIdx * PQ_M;
       for (int i = startIdx; i < endIdx; i++, codeOff += PQ_M) {
-        float approx = 0f;
-        for (int m = 0; m < PQ_M; m++) {
-          approx += adcTable[m * 256 + (flatCodes[codeOff + m] & 0xFF)];
-        }
+        final float approx = adcTable[flatCodes[codeOff] & 0xFF]
+                             + adcTable[256 + (flatCodes[codeOff + 1] & 0xFF)]
+                             + adcTable[512 + (flatCodes[codeOff + 2] & 0xFF)]
+                             + adcTable[768 + (flatCodes[codeOff + 3] & 0xFF)]
+                             + adcTable[1024 + (flatCodes[codeOff + 4] & 0xFF)]
+                             + adcTable[1280 + (flatCodes[codeOff + 5] & 0xFF)]
+                             + adcTable[1536 + (flatCodes[codeOff + 6] & 0xFF)]
+                             + adcTable[1792 + (flatCodes[codeOff + 7] & 0xFF)]
+                             + adcTable[2048 + (flatCodes[codeOff + 8] & 0xFF)]
+                             + adcTable[2304 + (flatCodes[codeOff + 9] & 0xFF)]
+                             + adcTable[2560 + (flatCodes[codeOff + 10] & 0xFF)]
+                             + adcTable[2816 + (flatCodes[codeOff + 11] & 0xFF)]
+                             + adcTable[3072 + (flatCodes[codeOff + 12] & 0xFF)]
+                             + adcTable[3328 + (flatCodes[codeOff + 13] & 0xFF)];
         if (approx < neighborDistances[NUM_NEIGHBORS - 1]) {
           insertIntoSortedArray(neighborIds, neighborDistances, flatIds[i], approx);
-        }
-      }
-
-      if (probe == NUM_PROBE_GRAY - 1) {
-        int fc = 0;
-        for (int k = 0; k < RERANK_TOP; k++) {
-          if (neighborIds[k] >= 0 && fraudLabels[neighborIds[k]] == 1) {
-            fc++;
-          }
-        }
-        if (fc <= 1 || fc >= RERANK_TOP - 1) {
-          return fc;
         }
       }
     }
@@ -284,13 +266,15 @@ public class InvertedFileIndex {
     final float[] queryVector,
     final float[] lookupFlat
   ) {
+    final float[] cb = this.pqCodebooksFlat;
+
     for (int m = 0; m < PQ_M; m++) {
       final float q = queryVector[m];
-      final float[] cb = pqCodebooksFlat[m];
-      final int rowOff = m << 8;
+      final int offset = m << 8; // m * 256
       for (int c = 0; c < PQ_CODEBOOK_SIZE; c++) {
-        final float d = q - cb[c];
-        lookupFlat[rowOff + c] = d * d;
+        int idx = offset + c;
+        float diff = q - cb[idx];
+        lookupFlat[idx] = diff * diff;
       }
     }
   }

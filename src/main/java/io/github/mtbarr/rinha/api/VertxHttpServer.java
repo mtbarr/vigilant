@@ -66,11 +66,12 @@ public final class VertxHttpServer {
           httpRequest.bodyHandler(requestBody -> {
             final HttpServerResponse response = httpRequest.response();
             response.putHeader("Content-Type", CONTENT_TYPE_JSON);
-            try {
-              response.end(buildFraudScoreResponse(requestBody.getBytes()));
-            } catch (final Exception unexpectedError) {
-              response.end(FRAUD_SCORE_RESPONSES[0]);
-            }
+            final byte[] payload = requestBody.getBytes();
+            vertxEngine.executeBlocking(
+              () -> buildFraudScoreResponse(payload),
+              false
+            ).onSuccess(response::end)
+             .onFailure(err -> response.end(FRAUD_SCORE_RESPONSES[0]));
           });
           return;
         }
