@@ -6,7 +6,7 @@ COPY src/main/java/io/github/mtbarr/rinha/index/OfflineIndexBuilder.java \
 RUN mkdir -p classes && javac -d classes \
     src/main/java/io/github/mtbarr/rinha/index/OfflineIndexBuilder.java
 COPY src/main/resources/references.json.gz src/main/resources/references.json.gz
-RUN java -Xmx4g -cp classes \
+RUN mkdir -p /data && java -Xmx4g -cp classes \
     io.github.mtbarr.rinha.index.OfflineIndexBuilder \
     src/main/resources/references.json.gz \
     /data/index.bin
