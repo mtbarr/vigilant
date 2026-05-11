@@ -53,7 +53,7 @@ public class InvertedFileIndex {
     final String indexPath = System.getenv().getOrDefault("INDEX_PATH", "/data/index.bin");
     try {
       loadIndexFromFile(indexPath);
-      warmup();
+      //warmup();
       isIndexReady = true;
     } catch (final Exception exception) {
       System.err.println("Index not loaded: " + exception.getMessage());
