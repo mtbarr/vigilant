@@ -107,8 +107,10 @@ public class InvertedFileIndex {
 
       final long vecLen = (long) totalVectorCount * NUM_DIMENSIONS * 4L;
       exactVectors = new float[totalVectorCount * NUM_DIMENSIONS];
-      indexSegment.asSlice(vectorsOffset, vecLen)
-        .asByteBuffer().order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer().get(exactVectors);
+      final MemorySegment vs = indexSegment.asSlice(vectorsOffset, vecLen);
+      for (int i = 0; i < exactVectors.length; i++) {
+        exactVectors[i] = vs.get(FLOAT_LE, (long) i * 4L);
+      }
 
       // --- Copy inverted lists to flat arrays ---
       final long invertedListsOffset = labelsOffset + totalVectorCount;
@@ -191,7 +193,7 @@ public class InvertedFileIndex {
       centroidDistances[ci] = dist;
       centroidOrder[ci] = ci;
     }
-    final int[] probes = selectNearestCentroids(centroidDistances, centroidOrder);
+    partialSortCentroids(centroidOrder, centroidDistances);
 
     final float[] adcTable = adcLookupFlat.get();
     buildAdcLookupTable(queryVector, adcTable);
@@ -200,7 +202,7 @@ public class InvertedFileIndex {
     Arrays.fill(neighborDistances, Float.MAX_VALUE);
 
     for (int probe = 0; probe < NUM_PROBE_CLUSTERS; probe++) {
-      final int ci = probes[probe];
+      final int ci = centroidOrder[probe];
       final int startIdx = clusterOffsets[ci];
       final int endIdx = clusterOffsets[ci + 1];
 
@@ -310,26 +312,64 @@ public class InvertedFileIndex {
     ids[pos] = newId;
   }
 
-  private static int[] selectNearestCentroids(final float[] dist, final int[] scratch) {
-    final int K = InvertedFileIndex.NUM_PROBE_CLUSTERS;
-    final int[] indices = new int[K];
-    final float[] top = new float[K];
-    System.arraycopy(scratch, 0, indices, 0, K);
-    System.arraycopy(dist, 0, top, 0, K);
-    for (int i = K; i < dist.length; i++) {
-      int worst = 0;
-      float worstVal = top[0];
-      for (int j = 1; j < K; j++) {
-        if (top[j] > worstVal) {
-          worst = j;
-          worstVal = top[j];
-        }
+  private static void partialSortCentroids(
+    final int[] order,
+    final float[] dist
+  ) {
+    quickselect(order, dist, 0, order.length - 1, InvertedFileIndex.NUM_PROBE_CLUSTERS);
+    for (int i = 1; i < InvertedFileIndex.NUM_PROBE_CLUSTERS; i++) {
+      final int o = order[i];
+      final float d = dist[o];
+      int j = i - 1;
+      while (j >= 0 && dist[order[j]] > d) {
+        order[j + 1] = order[j];
+        j--;
       }
-      if (dist[i] < worstVal) {
-        top[worst] = dist[i];
-        indices[worst] = i;
+      order[j + 1] = o;
+    }
+  }
+
+  private static void quickselect(
+    final int[] order,
+    final float[] dist,
+    final int l,
+    final int r,
+    final int k
+  ) {
+    if (l >= r) {
+      return;
+    }
+    final int pi = partition(order, dist, l, r);
+    final int rank = pi - l + 1;
+    if (rank == k) {
+      return;
+    }
+    if (k < rank) {
+      quickselect(order, dist, l, pi - 1, k);
+    } else {
+      quickselect(order, dist, pi + 1, r, k - rank);
+    }
+  }
+
+  private static int partition(
+    final int[] order,
+    final float[] dist,
+    final int l,
+    final int r
+  ) {
+    final float pivot = dist[order[r]];
+    int si = l - 1;
+    for (int i = l; i < r; i++) {
+      if (dist[order[i]] <= pivot) {
+        si++;
+        final int tmp = order[si];
+        order[si] = order[i];
+        order[i] = tmp;
       }
     }
-    return indices;
+    final int tmp = order[si + 1];
+    order[si + 1] = order[r];
+    order[r] = tmp;
+    return si + 1;
   }
 }
